@@ -1,0 +1,12 @@
+# MOSS-Audio runtime is installed from the upstream repo via:
+#   pip install -e ".[torch-runtime]"
+# (see setup.sh). The packages below cover the bits this wrapper script
+# touches directly so a plain `pip install -r requirements.txt` inside the
+# cloned MOSS-Audio dir produces a working environment.
+
+torch>=2.4
+transformers>=4.45
+huggingface_hub[cli]>=0.25
+soundfile
+librosa
+numpy
