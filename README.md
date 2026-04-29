@@ -1,8 +1,20 @@
-# MOSS-Audio-8B-Thinking — Local Runner (stable, minimal-deps)
+# MOSS-Audio Local Runner (stable, minimal-deps, CPU-friendly)
 
-Run [`OpenMOSS-Team/MOSS-Audio-8B-Thinking`](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-8B-Thinking)
-on a local machine with a fresh, modern Python environment — no
-torchaudio, no torchcodec, no system FFmpeg ABI to fight.
+Run any of the four MOSS-Audio variants on a local machine with a fresh,
+modern Python environment — no torchaudio, no torchcodec, no system
+FFmpeg ABI to fight.
+
+## Supported variants
+
+| `--variant`   | HF repo                                          | Params | RAM (fp16) | RAM (fp32) |
+| ------------- | ------------------------------------------------ | ------ | ---------- | ---------- |
+| `4b-instruct` | [OpenMOSS-Team/MOSS-Audio-4B-Instruct](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-4B-Instruct) | ~4.6B  | ~9 GB      | ~18 GB     |
+| `4b-thinking` | [OpenMOSS-Team/MOSS-Audio-4B-Thinking](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-4B-Thinking) | ~4.6B  | ~9 GB      | ~18 GB     |
+| `8b-instruct` | [OpenMOSS-Team/MOSS-Audio-8B-Instruct](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-8B-Instruct) | ~8.6B  | ~17 GB     | ~34 GB     |
+| `8b-thinking` | [OpenMOSS-Team/MOSS-Audio-8B-Thinking](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-8B-Thinking) | ~8.6B  | ~17 GB     | ~34 GB     |
+
+Recommendation for 32 GB RAM, no GPU: **`--variant 4b-instruct`** — the
+fastest and smallest variant, instruction-tuned for direct answers.
 
 ## What's different from the upstream setup
 
@@ -22,11 +34,13 @@ machines. This wrapper:
 
 ## Files
 
-| File              | Purpose                                                   |
-| ----------------- | --------------------------------------------------------- |
-| `infer.py`        | CLI inference script. librosa-based audio loader.         |
-| `setup.sh`        | Clones MOSS-Audio, installs minimal deps, downloads weights. |
-| `requirements.txt`| Pinned, stable dependency set.                            |
+| File                 | Purpose                                                          |
+| -------------------- | ---------------------------------------------------------------- |
+| `infer.py`           | CLI inference script. librosa-based audio loader.                |
+| `setup.sh`           | Clones MOSS-Audio, installs minimal deps, downloads 8B-Thinking. |
+| `download_models.sh` | Download any subset of the 4 variants on demand.                 |
+| `patch_existing.sh`  | Re-apply patches to an existing checkout.                        |
+| `requirements.txt`   | Pinned, stable dependency set.                                   |
 
 ## Quick start
 
@@ -34,15 +48,22 @@ machines. This wrapper:
 # Fresh Python 3.10–3.12 env recommended:
 python -m venv env && source env/bin/activate
 
-# One-shot install (clone + deps + weights + copy infer.py in)
+# 1. Install deps + clone upstream MOSS-Audio repo (does NOT download weights)
 bash setup.sh
 
-# Run inference
+# 2. Download whichever variant(s) you want
+bash download_models.sh 4b-instruct          # smallest/fastest
+# or:
+bash download_models.sh 8b-thinking          # best reasoning
+# or:
+bash download_models.sh all                  # ~52 GB total
+
+# 3. Run inference (use --variant shorthand)
 cd MOSS-Audio
 python infer_local.py \
+    --variant 4b-instruct \
     --audio path/to/clip.mp3 \
-    --model ./weights/MOSS-Audio-8B-Thinking \
-    --device auto \
+    --device cpu \
     --prompt "Describe this audio."
 ```
 
@@ -81,17 +102,30 @@ open shared object file` on CPU-only machines).
 ## CLI options
 
 ```
---model           Path to local weights dir (default: ./weights/MOSS-Audio-8B-Thinking)
+--variant         4b-instruct | 4b-thinking | 8b-instruct | 8b-thinking
+                  Shorthand. Resolves to ./weights/MOSS-Audio-<variant>/.
+--model           Custom local weights dir. Overrides --variant.
 --audio           Input audio file (required)
 --prompt          Instruction passed to the model (default: "Describe this audio.")
---device          auto | cpu | cuda | cuda:N (default: auto - GPU if present, else CPU)
+--device          auto | cpu | cuda | cuda:N (default: auto)
 --dtype           auto | float32 | float16 | bfloat16 (default: auto)
---max-new-tokens  Generation length cap (default: 1024)
+                  auto = bfloat16 on GPU, float16 on CPU.
+--max-new-tokens  Generation length cap (default: 512). Use 256 for faster CPU runs.
 --temperature     Sampling temperature (default: 1.0)
 --top-p           Nucleus sampling (default: 1.0)
 --top-k           Top-k sampling (default: 50)
 --no-time-marker  Disable time-marker tokens
 ```
+
+### Choosing a variant
+
+- **`4b-instruct`** — smallest, fastest, most direct. Best for ASR,
+  captioning, and short Q&A on CPU.
+- **`4b-thinking`** — same size as 4B-Instruct but emits chain-of-thought
+  reasoning before the final answer. Slower because the response is longer.
+- **`8b-instruct`** — higher answer quality at the cost of ~2× RAM and
+  inference time. Needs float16 to fit in 32 GB RAM.
+- **`8b-thinking`** — strongest reasoning but the slowest on CPU.
 
 ## Audio loading
 
@@ -113,18 +147,31 @@ wheel — no system install needed) and mp3/m4a via audioread. If you
 still hit a decode error on an exotic codec, install ffmpeg system-wide
 once: `sudo apt install ffmpeg` or `conda install -c conda-forge ffmpeg`.
 
-## CPU-only mode
+## CPU-only mode (32 GB RAM, no GPU)
+
+The wrapper auto-detects no-GPU and falls back to CPU. Recommended:
 
 ```bash
+bash download_models.sh 4b-instruct
+cd MOSS-Audio
 python infer_local.py \
+    --variant 4b-instruct \
     --audio clip.mp3 \
-    --model ./weights/MOSS-Audio-8B-Thinking \
     --device cpu \
-    --prompt "Describe this audio."
+    --max-new-tokens 256 \
+    --prompt "Transcribe this audio."
 ```
 
-8B-Thinking on CPU takes several minutes per response and needs ~32 GB
-of RAM. For faster CPU runs use `OpenMOSS-Team/MOSS-Audio-4B-Instruct`.
+On startup you'll see a memory estimate so you can confirm it fits, e.g.:
+
+```
+[infer] model=./weights/MOSS-Audio-4B-Instruct  params=~4.6B
+[infer] device=cpu  dtype=torch.float16  threads=20
+[infer] estimated model RAM: ~8.6 GB (system has 31.2 GB)
+```
+
+If you really want 8B-Thinking on a 32 GB machine, keep float16 (the
+default on CPU) — float32 will OOM.
 
 ## Example prompts
 

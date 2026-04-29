@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# Stable setup for OpenMOSS-Team/MOSS-Audio-8B-Thinking.
+# Stable setup for the MOSS-Audio model family.
 #
 # Avoids the upstream `[torch-runtime]` extra (which pulls torchaudio +
-# torchcodec and breaks on FFmpeg ABI mismatches). Instead we install
-# a pinned minimal stack from requirements.txt and use librosa for I/O.
+# torchcodec and breaks on FFmpeg ABI mismatches). Installs a pinned
+# minimal stack from requirements.txt and uses librosa for I/O.
 #
 # Usage:
-#     bash setup.sh
+#     bash setup.sh                 # install deps only (no weights)
+#     bash setup.sh 4b-instruct     # also download the 4B-Instruct variant
+#     bash setup.sh 8b-thinking
 #
-# Idempotent: safe to re-run. Reuses any existing clone and weight dir.
+# After setup.sh finishes, use download_models.sh to fetch additional
+# variants. Idempotent - safe to re-run.
 
 set -euo pipefail
 
 REPO_DIR="MOSS-Audio"
-MODEL_REPO="OpenMOSS-Team/MOSS-Audio-8B-Thinking"
-WEIGHTS_DIR="${REPO_DIR}/weights/MOSS-Audio-8B-Thinking"
+DEFAULT_VARIANT="${1:-}"
 
 # 1. Source tree (provides the `src` package imported by infer.py).
 if [ ! -d "${REPO_DIR}" ]; then
@@ -66,12 +68,12 @@ echo ">>> Installing pinned minimal stack from requirements.txt"
 pip install --upgrade pip
 pip install --extra-index-url "${TORCH_INDEX}" -r requirements.txt
 
-# 5. Download weights.
-echo ">>> Ensuring weights at ${WEIGHTS_DIR}"
-if [ ! -d "${WEIGHTS_DIR}" ] || [ -z "$(ls -A "${WEIGHTS_DIR}" 2>/dev/null)" ]; then
-    hf download "${MODEL_REPO}" --local-dir "${WEIGHTS_DIR}"
+# 5. Optionally download a model variant if requested.
+if [ -n "${DEFAULT_VARIANT}" ]; then
+    echo ">>> Downloading variant: ${DEFAULT_VARIANT}"
+    bash download_models.sh "${DEFAULT_VARIANT}"
 else
-    echo "    Already present - skipping download."
+    echo ">>> Skipping weight download (run download_models.sh later)."
 fi
 
 # 6. Place infer.py inside the MOSS-Audio dir so its `src.*` imports resolve.
@@ -82,14 +84,16 @@ cat <<EOF
 
 Setup complete.
 
-To run:
-    cd ${REPO_DIR}
-    python infer_local.py \\
-        --audio path/to/clip.mp3 \\
-        --model ./weights/MOSS-Audio-8B-Thinking \\
-        --device auto \\
-        --prompt "Describe this audio."
+Next steps:
+    1. Download a variant if you haven't already:
+           bash download_models.sh 4b-instruct        # smallest, fastest
+           bash download_models.sh 8b-thinking        # best reasoning
 
-Force CPU on machines without an NVIDIA GPU:
-    python infer_local.py ... --device cpu
+    2. Run inference:
+           cd ${REPO_DIR}
+           python infer_local.py \\
+               --variant 4b-instruct \\
+               --audio path/to/clip.mp3 \\
+               --device cpu \\
+               --prompt "Describe this audio."
 EOF
