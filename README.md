@@ -60,13 +60,31 @@ python infer_local.py --audio sample.wav --model ./weights/MOSS-Audio-8B-Thinkin
 --model           Path to local weights dir (default: ./weights/MOSS-Audio-8B-Thinking)
 --audio           Input audio file (required)
 --prompt          Instruction passed to the model (default: "Describe this audio.")
---device          Device map, e.g. "cuda:0" or "cpu" (default: cuda:0)
+--device          auto | cpu | cuda | cuda:N (default: auto - GPU if present, else CPU)
+--dtype           auto | float32 | float16 | bfloat16 (default: auto)
 --max-new-tokens  Generation length cap (default: 1024)
 --temperature     Sampling temperature (default: 1.0)
 --top-p           Nucleus sampling (default: 1.0)
 --top-k           Top-k sampling (default: 50)
 --no-time-marker  Disable time-marker tokens
 ```
+
+## CPU-only mode
+
+If you don't have an NVIDIA GPU, force CPU:
+
+```bash
+python infer_local.py \
+    --audio path/to/clip.mp3 \
+    --model ./weights/MOSS-Audio-8B-Thinking \
+    --device cpu \
+    --prompt "Describe this audio."
+```
+
+Expect 8B-Thinking on CPU to take several minutes per response and use
+~32 GB of RAM. For faster CPU runs, try the smaller variant
+`OpenMOSS-Team/MOSS-Audio-4B-Instruct` (download to a different
+`--local-dir` and point `--model` at it).
 
 ## Example prompts
 

@@ -56,7 +56,17 @@ def parse_args() -> argparse.Namespace:
         default="Describe this audio.",
         help="Instruction passed to the model. Use 'Transcribe this audio.' for ASR.",
     )
-    parser.add_argument("--device", default="cuda:0", help="Device map, e.g. 'cuda:0' or 'cpu'.")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="'auto' (pick GPU if available, else CPU), 'cpu', 'cuda', or 'cuda:N'.",
+    )
+    parser.add_argument(
+        "--dtype",
+        default="auto",
+        choices=["auto", "float32", "float16", "bfloat16"],
+        help="Model dtype. 'auto' = bfloat16 on GPU, float32 on CPU.",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=1.0)
@@ -69,14 +79,47 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def resolve_device(requested: str) -> str:
+    if requested == "auto":
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda" and torch.cuda.is_available():
+        return "cuda:0"
+    if requested.startswith("cuda") and not torch.cuda.is_available():
+        raise SystemExit(
+            "CUDA was requested but no NVIDIA driver / GPU is visible to PyTorch. "
+            "Re-run with --device cpu, or install a CUDA-capable driver."
+        )
+    return requested
+
+
+def resolve_dtype(requested: str, device: str):
+    if requested == "auto":
+        return torch.bfloat16 if device.startswith("cuda") else torch.float32
+    return {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }[requested]
+
+
 def main() -> int:
     args = parse_args()
+
+    device = resolve_device(args.device)
+    dtype = resolve_dtype(args.dtype, device)
+    print(f"[infer] device={device} dtype={dtype}", file=sys.stderr)
+    if device == "cpu":
+        print(
+            "[infer] running on CPU - 8B model inference will be slow "
+            "(many minutes per response) and needs ~32GB RAM.",
+            file=sys.stderr,
+        )
 
     model = MossAudioModel.from_pretrained(
         args.model,
         trust_remote_code=True,
-        torch_dtype="auto",
-        device_map=args.device,
+        torch_dtype=dtype,
+        device_map=device,
     )
     model.eval()
 
