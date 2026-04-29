@@ -52,6 +52,11 @@ from src.processing_moss_audio import MossAudioProcessor
 
 def load_audio(path: str, sample_rate: int = 16000) -> np.ndarray:
     """Mono float32 numpy array at sample_rate. No torchaudio/torchcodec."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Audio file not found: {path!r}. "
+            "Pass an absolute path with --audio."
+        )
     audio, _ = librosa.load(path, sr=sample_rate, mono=True)
     if isinstance(audio, np.ndarray):
         audio = audio.astype("float32")
