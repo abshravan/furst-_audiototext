@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtualenvs
+env/
+venv/
+.venv/
+
+# Cloned upstream + downloaded weights (large; users fetch via setup.sh)
+MOSS-Audio/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
