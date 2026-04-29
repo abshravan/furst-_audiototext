@@ -24,6 +24,19 @@ else
     echo ">>> Reusing existing clone at ${REPO_DIR}"
 fi
 
+# 1b. Patch out the dead `import torchaudio` in src/processing_moss_audio.py.
+#     The upstream module imports torchaudio at module level but never uses
+#     it; on CPU-only machines the import explodes trying to load libcudart.
+PROC_FILE="${REPO_DIR}/src/processing_moss_audio.py"
+if [ -f "${PROC_FILE}" ]; then
+    if grep -qE '^import torchaudio$' "${PROC_FILE}"; then
+        echo ">>> Patching out 'import torchaudio' in ${PROC_FILE}"
+        sed -i 's/^import torchaudio$/# import torchaudio  # patched: unused, breaks on CPU-only hosts/' "${PROC_FILE}"
+    else
+        echo ">>> ${PROC_FILE} already patched (no torchaudio import found)"
+    fi
+fi
+
 # 2. Defensively remove fragile audio deps if a previous attempt installed them.
 #    torchaudio is unused by our wrapper (we stub it in infer.py) so it can go.
 echo ">>> Purging torchaudio / torchcodec if present"
