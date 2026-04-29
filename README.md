@@ -99,13 +99,69 @@ that file, so the import succeeds without loading torchaudio's native
 extension (which is what was failing with `libcudart.so.13: cannot
 open shared object file` on CPU-only machines).
 
+## Batch mode + dashboard
+
+Process every audio file in a folder and watch progress in a browser:
+
+```bash
+cd MOSS-Audio
+python infer_local.py \
+    --variant 4b-instruct \
+    --batch-dir /path/to/audio_folder \
+    --device cpu \
+    --max-new-tokens 256 \
+    --prompt "Transcribe this audio."
+
+# Open the dashboard (auto-refreshes every 5 s while the job runs)
+xdg-open /path/to/audio_folder/_batch_output/dashboard.html
+```
+
+The model loads **once** and then streams through every file. Output:
+
+```
+audio_folder/_batch_output/
+├── dashboard.html    # self-contained, auto-refreshing dashboard
+└── results.json      # machine-readable results (also used to resume)
+```
+
+### What you get
+
+- **Stats panel** — total / done / failed / pending / avg duration / ETA
+- **Live progress bar**
+- **Per-file table** — status badge, duration, transcript (collapsible
+  for long outputs)
+- **Auto-refresh** every 5 s while running; static once finished
+- **Dark-mode aware** (uses your OS preference)
+
+### Resume
+
+If you Ctrl-C halfway through and re-run the same command, already-done
+files are skipped. Pass `--no-resume` to start over.
+
+### Batch options
+
+```
+--batch-dir DIR     Folder of audio files (mutually exclusive with --audio).
+--output-dir DIR    Where to write dashboard + results.json.
+                    Default: <batch-dir>/_batch_output/.
+--no-recursive      Don't recurse into subdirectories.
+--no-resume         Ignore prior results.json and start fresh.
+```
+
+Supported audio extensions: `.wav .mp3 .flac .ogg .m4a .opus .webm
+.aac .wma .aiff`.
+
 ## CLI options
 
 ```
 --variant         4b-instruct | 4b-thinking | 8b-instruct | 8b-thinking
                   Shorthand. Resolves to ./weights/MOSS-Audio-<variant>/.
 --model           Custom local weights dir. Overrides --variant.
---audio           Input audio file (required)
+--audio           Single audio file (mutually exclusive with --batch-dir).
+--batch-dir       Folder of audio files; processes all and writes dashboard.html.
+--output-dir      Where to write batch outputs. Default: <batch-dir>/_batch_output/.
+--no-recursive    Don't recurse into subdirectories of --batch-dir.
+--no-resume       Ignore prior results.json and start fresh.
 --prompt          Instruction passed to the model (default: "Describe this audio.")
 --device          auto | cpu | cuda | cuda:N (default: auto)
 --dtype           auto | float32 | float16 | bfloat16 (default: auto)
