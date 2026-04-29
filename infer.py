@@ -1,32 +1,41 @@
-"""Local inference for OpenMOSS-Team/MOSS-Audio-8B-Thinking.
+"""Local inference for OpenMOSS-Team/MOSS-Audio-8B-Thinking (CPU edition).
 
-Stable, minimal-dependency wrapper. Loads audio via librosa (NumPy) and
-runs the model with stock PyTorch + Transformers. Does NOT use
-torchaudio or torchcodec.
+Stable, minimal-dependency wrapper. Loads audio via librosa and runs the
+model with stock PyTorch + Transformers. No torchaudio, no torchcodec,
+no GPU required.
 
 Layout (after running setup.sh):
-    MOSS-Audio/                  <- upstream repo, provides `src` package
-        weights/
-            MOSS-Audio-8B-Thinking/
-        infer_local.py           <- this file, copied in by setup.sh
+    MOSS-Audio/
+        weights/MOSS-Audio-8B-Thinking/
+        infer_local.py   <- this file, copied in by setup.sh
 
 Run:
     cd MOSS-Audio
-    python infer_local.py \
-        --audio path/to/clip.mp3 \
-        --model ./weights/MOSS-Audio-8B-Thinking \
-        --device auto \
+    python infer_local.py \\
+        --audio path/to/clip.mp3 \\
+        --model ./weights/MOSS-Audio-8B-Thinking \\
+        --device cpu \\
         --prompt "Describe this audio."
+
+RAM guide (no GPU):
+    8B model, float16  ~17 GB  <- default, fits in 32 GB
+    8B model, float32  ~34 GB  <- will OOM on 32 GB, don't use
+    4B model, float32  ~18 GB  <- safer, download MOSS-Audio-4B-Thinking
+    4B model, float16   ~9 GB  <- most headroom
+
+Speed: expect 5-30 min per response on i7 12th gen. Set --max-new-tokens
+lower (e.g. 256) to get answers faster.
 """
 
 import argparse
+import os
 import sys
 import types
 
-# MOSS-Audio's src/processing_moss_audio.py has a module-level `import
-# torchaudio` that is never actually used. Real torchaudio links to
-# libtorchaudio + libcudart, both of which fail on machines without a
-# matching CUDA runtime. Stub it out before src.* gets imported below.
+# src/processing_moss_audio.py has a dead `import torchaudio` at module
+# level that breaks on CPU-only hosts (tries to dlopen libcudart).
+# Insert an empty stub BEFORE any src.* import so the real torchaudio
+# package is never loaded.
 sys.modules.setdefault("torchaudio", types.ModuleType("torchaudio"))
 
 import librosa
@@ -37,75 +46,40 @@ from src.modeling_moss_audio import MossAudioModel
 from src.processing_moss_audio import MossAudioProcessor
 
 
+# ---------------------------------------------------------------------------
+# Audio loading
+# ---------------------------------------------------------------------------
+
 def load_audio(path: str, sample_rate: int = 16000) -> np.ndarray:
-    """Mono float32 numpy array at ``sample_rate``. No torchaudio/torchcodec."""
+    """Mono float32 numpy array at sample_rate. No torchaudio/torchcodec."""
     audio, _ = librosa.load(path, sr=sample_rate, mono=True)
     if isinstance(audio, np.ndarray):
         audio = audio.astype("float32")
     return audio
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run MOSS-Audio locally on an audio file.")
-    parser.add_argument(
-        "--model",
-        default="./weights/MOSS-Audio-8B-Thinking",
-        help="Path to the local MOSS-Audio model directory.",
-    )
-    parser.add_argument(
-        "--audio",
-        required=True,
-        help="Path to the input audio file (wav, mp3, flac, ogg, m4a, ...).",
-    )
-    parser.add_argument(
-        "--prompt",
-        default="Describe this audio.",
-        help="Instruction for the model. Use 'Transcribe this audio.' for ASR.",
-    )
-    parser.add_argument(
-        "--device",
-        default="auto",
-        help="'auto' (GPU if present, else CPU), 'cpu', 'cuda', or 'cuda:N'.",
-    )
-    parser.add_argument(
-        "--dtype",
-        default="auto",
-        choices=["auto", "float32", "float16", "bfloat16"],
-        help="Model dtype. 'auto' = bfloat16 on GPU, float32 on CPU.",
-    )
-    parser.add_argument("--max-new-tokens", type=int, default=1024)
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--top-p", type=float, default=1.0)
-    parser.add_argument("--top-k", type=int, default=50)
-    parser.add_argument(
-        "--no-time-marker",
-        action="store_true",
-        help="Disable time-marker tokens in the processor.",
-    )
-    return parser.parse_args()
-
+# ---------------------------------------------------------------------------
+# Device / dtype helpers
+# ---------------------------------------------------------------------------
 
 def resolve_device(requested: str) -> str:
     if requested == "auto":
         return "cuda:0" if torch.cuda.is_available() else "cpu"
-    if requested == "cuda":
-        if not torch.cuda.is_available():
-            raise SystemExit(
-                "CUDA was requested but no NVIDIA driver / GPU is visible. "
-                "Re-run with --device cpu, or install a CUDA-capable driver."
-            )
-        return "cuda:0"
     if requested.startswith("cuda") and not torch.cuda.is_available():
         raise SystemExit(
-            "CUDA was requested but no NVIDIA driver / GPU is visible. "
-            "Re-run with --device cpu, or install a CUDA-capable driver."
+            "CUDA requested but no NVIDIA driver/GPU visible. "
+            "Re-run with --device cpu."
         )
     return requested
 
 
 def resolve_dtype(requested: str, device: str) -> torch.dtype:
     if requested == "auto":
-        return torch.bfloat16 if device.startswith("cuda") else torch.float32
+        if device.startswith("cuda"):
+            return torch.bfloat16
+        # CPU: float16 halves memory vs float32.
+        # 8B in float32 needs ~34 GB (OOM on 32 GB); float16 needs ~17 GB.
+        return torch.float16
     return {
         "float32": torch.float32,
         "float16": torch.float16,
@@ -113,24 +87,80 @@ def resolve_dtype(requested: str, device: str) -> torch.dtype:
     }[requested]
 
 
+def configure_cpu_threads() -> int:
+    """Pin PyTorch to all available logical CPUs for max throughput."""
+    n = os.cpu_count() or 4
+    torch.set_num_threads(n)
+    torch.set_num_interop_threads(2)
+    return n
+
+
+def ram_estimate_gb(dtype: torch.dtype) -> float:
+    """Rough weight-only RAM estimate for the 8B model."""
+    bytes_per_param = {torch.float32: 4, torch.float16: 2, torch.bfloat16: 2}.get(dtype, 4)
+    return round(8.6e9 * bytes_per_param / 1024 ** 3, 1)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run MOSS-Audio on an audio file (CPU-friendly).")
+    p.add_argument("--model", default="./weights/MOSS-Audio-8B-Thinking",
+                   help="Local model directory.")
+    p.add_argument("--audio", required=True,
+                   help="Input audio file (wav, mp3, flac, ogg, m4a, ...).")
+    p.add_argument("--prompt", default="Describe this audio.",
+                   help="Instruction for the model.")
+    p.add_argument("--device", default="auto",
+                   help="'auto', 'cpu', 'cuda', or 'cuda:N'. Default: auto.")
+    p.add_argument("--dtype", default="auto",
+                   choices=["auto", "float16", "float32", "bfloat16"],
+                   help="Model dtype. Default: float16 on CPU, bfloat16 on GPU.")
+    p.add_argument("--max-new-tokens", type=int, default=512,
+                   help="Max tokens to generate. Lower = faster. Default: 512.")
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--top-p", type=float, default=1.0)
+    p.add_argument("--top-k", type=int, default=50)
+    p.add_argument("--no-time-marker", action="store_true",
+                   help="Disable time-marker tokens.")
+    return p.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> int:
     args = parse_args()
 
     device = resolve_device(args.device)
     dtype = resolve_dtype(args.dtype, device)
-    print(f"[infer] device={device} dtype={dtype}", file=sys.stderr)
-    if device == "cpu":
-        print(
-            "[infer] running on CPU - 8B model inference will take minutes "
-            "per response and needs ~32GB RAM.",
-            file=sys.stderr,
-        )
 
+    if device == "cpu":
+        n_threads = configure_cpu_threads()
+        est_gb = ram_estimate_gb(dtype)
+        print(f"[infer] device=cpu  dtype={dtype}  threads={n_threads}", file=sys.stderr)
+        print(f"[infer] estimated model RAM: ~{est_gb} GB "
+              f"(system has {round(os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') / 1024**3, 1)} GB)",
+              file=sys.stderr)
+        if est_gb > 28:
+            print("[infer] WARNING: model may not fit in 32 GB RAM at this dtype. "
+                  "Use --dtype float16 or switch to MOSS-Audio-4B-Thinking.",
+                  file=sys.stderr)
+        print("[infer] NOTE: CPU inference is slow (minutes per response). "
+              "Use --max-new-tokens 256 for quicker results.", file=sys.stderr)
+    else:
+        print(f"[infer] device={device}  dtype={dtype}", file=sys.stderr)
+
+    print("[infer] Loading model weights ...", file=sys.stderr)
     model = MossAudioModel.from_pretrained(
         args.model,
         trust_remote_code=True,
         torch_dtype=dtype,
         device_map=device,
+        low_cpu_mem_usage=True,   # stream weights in; avoids doubling peak RAM
     )
     model.eval()
 
@@ -140,6 +170,7 @@ def main() -> int:
         enable_time_marker=not args.no_time_marker,
     )
 
+    print(f"[infer] Loading audio: {args.audio}", file=sys.stderr)
     raw_audio = load_audio(args.audio, sample_rate=processor.config.mel_sr)
 
     inputs = processor(text=args.prompt, audios=[raw_audio], return_tensors="pt")
@@ -148,6 +179,7 @@ def main() -> int:
         inputs["audio_data"] = inputs["audio_data"].to(model.dtype)
     inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
 
+    print(f"[infer] Generating (max_new_tokens={args.max_new_tokens}) ...", file=sys.stderr)
     with torch.no_grad():
         generated_ids = model.generate(
             **inputs,
