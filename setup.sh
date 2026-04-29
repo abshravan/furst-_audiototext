@@ -25,17 +25,35 @@ else
 fi
 
 # 2. Defensively remove fragile audio deps if a previous attempt installed them.
+#    torchaudio is unused by our wrapper (we stub it in infer.py) so it can go.
 echo ">>> Purging torchaudio / torchcodec if present"
 pip uninstall -y torchaudio torchcodec >/dev/null 2>&1 || true
 
-# 3. Install the pinned minimal stack. We deliberately do NOT run
+# 3. Pick a torch wheel index that matches the host. CPU-only by default;
+#    GPU users can re-run with FORCE_CUDA=1 to keep their existing CUDA wheels.
+HAS_NVIDIA=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    HAS_NVIDIA=1
+fi
+
+if [ "${FORCE_CUDA:-0}" = "1" ] || [ "${HAS_NVIDIA}" = "1" ]; then
+    TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+    echo ">>> NVIDIA GPU detected - using CUDA torch wheels (${TORCH_INDEX})"
+else
+    TORCH_INDEX="https://download.pytorch.org/whl/cpu"
+    echo ">>> No NVIDIA GPU detected - using CPU-only torch wheels"
+    # If a CUDA torch is already installed it will keep dragging libcudart in.
+    pip uninstall -y torch >/dev/null 2>&1 || true
+fi
+
+# 4. Install the pinned minimal stack. We deliberately do NOT run
 #    `pip install -e ".[torch-runtime]"` from inside MOSS-Audio - that
 #    extra pulls torchcodec back in.
 echo ">>> Installing pinned minimal stack from requirements.txt"
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install --extra-index-url "${TORCH_INDEX}" -r requirements.txt
 
-# 4. Download weights.
+# 5. Download weights.
 echo ">>> Ensuring weights at ${WEIGHTS_DIR}"
 if [ ! -d "${WEIGHTS_DIR}" ] || [ -z "$(ls -A "${WEIGHTS_DIR}" 2>/dev/null)" ]; then
     hf download "${MODEL_REPO}" --local-dir "${WEIGHTS_DIR}"
@@ -43,7 +61,7 @@ else
     echo "    Already present - skipping download."
 fi
 
-# 5. Place infer.py inside the MOSS-Audio dir so its `src.*` imports resolve.
+# 6. Place infer.py inside the MOSS-Audio dir so its `src.*` imports resolve.
 echo ">>> Installing infer_local.py into ${REPO_DIR}"
 cp infer.py "${REPO_DIR}/infer_local.py"
 

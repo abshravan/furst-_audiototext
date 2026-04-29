@@ -21,6 +21,13 @@ Run:
 
 import argparse
 import sys
+import types
+
+# MOSS-Audio's src/processing_moss_audio.py has a module-level `import
+# torchaudio` that is never actually used. Real torchaudio links to
+# libtorchaudio + libcudart, both of which fail on machines without a
+# matching CUDA runtime. Stub it out before src.* gets imported below.
+sys.modules.setdefault("torchaudio", types.ModuleType("torchaudio"))
 
 import librosa
 import numpy as np

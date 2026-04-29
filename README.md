@@ -64,7 +64,19 @@ If you previously attempted the upstream install, purge the bad bits:
 
 ```bash
 pip uninstall -y torchaudio torchcodec
+# If torch was the CUDA build but you have no GPU, swap to CPU:
+pip uninstall -y torch
+pip install --extra-index-url https://download.pytorch.org/whl/cpu torch
 ```
+
+### Why we don't install torchaudio
+
+`src/processing_moss_audio.py` from upstream does `import torchaudio`
+at module level but never actually calls anything from it. `infer.py`
+inserts an empty stub into `sys.modules['torchaudio']` before importing
+that file, so the import succeeds without loading torchaudio's native
+extension (which is what was failing with `libcudart.so.13: cannot
+open shared object file` on CPU-only machines).
 
 ## CLI options
 
