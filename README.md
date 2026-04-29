@@ -1,57 +1,69 @@
-# MOSS-Audio-8B-Thinking — Local Runner
+# MOSS-Audio-8B-Thinking — Local Runner (stable, minimal-deps)
 
-A small wrapper that runs
-[`OpenMOSS-Team/MOSS-Audio-8B-Thinking`](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-8B-Thinking)
-locally. Point it at an audio file and a prompt; it prints the model's
-response (transcription, description, captioning, QA, reasoning, etc.).
+Run [`OpenMOSS-Team/MOSS-Audio-8B-Thinking`](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-8B-Thinking)
+on a local machine with a fresh, modern Python environment — no
+torchaudio, no torchcodec, no system FFmpeg ABI to fight.
 
-The model is ~8.6B parameters and the weights are ~17 GB on disk, so a
-GPU with ≥24 GB VRAM (e.g. RTX 3090 / 4090 / A100) is recommended. CPU
-inference is possible but very slow.
+## What's different from the upstream setup
+
+The upstream `pip install -e ".[torch-runtime]"` pulls
+`torchaudio` → `torchcodec`, which then needs a system `libavutil.so.*`
+matching one of FFmpeg 4–8. That chain breaks constantly on stock
+machines. This wrapper:
+
+- **Removes torchaudio / torchcodec entirely.**
+- **Loads audio with librosa** (which uses libsndfile via soundfile and
+  falls back to audioread for mp3/m4a — both pure-Python distribution
+  paths).
+- **Pins a minimal, modern stack** in `requirements.txt`
+  (torch ≥ 2.4, transformers ≥ 4.45, numpy < 2).
+- **Skips the upstream `[torch-runtime]` extra** so torchcodec never
+  comes back in.
 
 ## Files
 
-| File              | Purpose                                                     |
-| ----------------- | ----------------------------------------------------------- |
-| `infer.py`        | CLI inference script (loads model, runs one prompt).        |
-| `setup.sh`        | Clones MOSS-Audio, installs deps, downloads 8B weights.     |
-| `requirements.txt`| Pip deps the wrapper touches directly.                      |
+| File              | Purpose                                                   |
+| ----------------- | --------------------------------------------------------- |
+| `infer.py`        | CLI inference script. librosa-based audio loader.         |
+| `setup.sh`        | Clones MOSS-Audio, installs minimal deps, downloads weights. |
+| `requirements.txt`| Pinned, stable dependency set.                            |
 
 ## Quick start
 
 ```bash
-# 1. One-shot install (clones MOSS-Audio, installs torch+ffmpeg, downloads weights)
+# Fresh Python 3.10–3.12 env recommended:
+python -m venv env && source env/bin/activate
+
+# One-shot install (clone + deps + weights + copy infer.py in)
 bash setup.sh
 
-# 2. Run inference
+# Run inference
 cd MOSS-Audio
 python infer_local.py \
     --audio path/to/clip.mp3 \
     --model ./weights/MOSS-Audio-8B-Thinking \
+    --device auto \
     --prompt "Describe this audio."
 ```
 
 ## Manual install
 
-If you'd rather install things yourself:
-
 ```bash
 git clone https://github.com/OpenMOSS/MOSS-Audio.git
-cd MOSS-Audio
-
-conda create -n moss-audio python=3.12 -y
-conda activate moss-audio
-conda install -c conda-forge "ffmpeg=7" -y
-pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e ".[torch-runtime]"
-
-# Download weights
+pip install --upgrade pip
+pip install -r requirements.txt          # NOT pip install -e ".[torch-runtime]"
 pip install -U "huggingface_hub[cli]"
 hf download OpenMOSS-Team/MOSS-Audio-8B-Thinking \
-    --local-dir ./weights/MOSS-Audio-8B-Thinking
-
-# Drop infer.py from this repo into the MOSS-Audio dir (it imports `src.*`)
-cp ../infer.py ./infer_local.py
+    --local-dir MOSS-Audio/weights/MOSS-Audio-8B-Thinking
+cp infer.py MOSS-Audio/infer_local.py
+cd MOSS-Audio
 python infer_local.py --audio sample.wav --model ./weights/MOSS-Audio-8B-Thinking
+```
+
+If you previously attempted the upstream install, purge the bad bits:
+
+```bash
+pip uninstall -y torchaudio torchcodec
 ```
 
 ## CLI options
@@ -71,39 +83,36 @@ python infer_local.py --audio sample.wav --model ./weights/MOSS-Audio-8B-Thinkin
 
 ## Audio loading
 
-`infer.py` no longer relies on torchaudio/torchcodec (which needs FFmpeg
-shared libs and often crashes with `libavutil.so.* not found`). It tries
-in order:
+`infer.py` uses exactly this:
 
-1. **soundfile** — handles wav, flac, ogg, mp3 (libsndfile ≥ 1.1).
-2. **librosa** — handles anything soundfile + audioread can read.
-3. **ffmpeg** binary on `$PATH` — final fallback for exotic codecs.
+```python
+import librosa
+import numpy as np
 
-Make sure at least one is available:
-
-```bash
-pip install soundfile librosa
-# and/or
-sudo apt install ffmpeg     # Debian/Ubuntu
-conda install -c conda-forge ffmpeg=7
+def load_audio(path, sample_rate=16000):
+    audio, _ = librosa.load(path, sr=sample_rate, mono=True)
+    if isinstance(audio, np.ndarray):
+        audio = audio.astype("float32")
+    return audio
 ```
+
+librosa decodes wav/flac/ogg via libsndfile (bundled in the `soundfile`
+wheel — no system install needed) and mp3/m4a via audioread. If you
+still hit a decode error on an exotic codec, install ffmpeg system-wide
+once: `sudo apt install ffmpeg` or `conda install -c conda-forge ffmpeg`.
 
 ## CPU-only mode
 
-If you don't have an NVIDIA GPU, force CPU:
-
 ```bash
 python infer_local.py \
-    --audio path/to/clip.mp3 \
+    --audio clip.mp3 \
     --model ./weights/MOSS-Audio-8B-Thinking \
     --device cpu \
     --prompt "Describe this audio."
 ```
 
-Expect 8B-Thinking on CPU to take several minutes per response and use
-~32 GB of RAM. For faster CPU runs, try the smaller variant
-`OpenMOSS-Team/MOSS-Audio-4B-Instruct` (download to a different
-`--local-dir` and point `--model` at it).
+8B-Thinking on CPU takes several minutes per response and needs ~32 GB
+of RAM. For faster CPU runs use `OpenMOSS-Team/MOSS-Audio-4B-Instruct`.
 
 ## Example prompts
 
@@ -112,11 +121,6 @@ Expect 8B-Thinking on CPU to take several minutes per response and use
 - `"What language is being spoken? Reason step by step."` — reasoning
 - `"Summarize the conversation."` — dialogue summarization
 
-## Notes
+## License
 
-- `infer.py` imports the `src.*` package shipped inside the upstream
-  MOSS-Audio repo, so it must live alongside that repo (`setup.sh` copies
-  it in for you as `infer_local.py`).
-- For a chat-style web UI, run `python app.py` from inside the MOSS-Audio
-  repo after weights are downloaded.
-- License: Apache 2.0 (matches upstream).
+Apache 2.0 (matches upstream).

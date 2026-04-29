@@ -1,12 +1,18 @@
-# MOSS-Audio runtime is installed from the upstream repo via:
-#   pip install -e ".[torch-runtime]"
-# (see setup.sh). The packages below cover the bits this wrapper script
-# touches directly so a plain `pip install -r requirements.txt` inside the
-# cloned MOSS-Audio dir produces a working environment.
+# Stable, minimal stack for running MOSS-Audio locally.
+# - NO torchaudio, NO torchcodec, NO system FFmpeg ABI.
+# - librosa + soundfile handle all audio decoding.
+# - numpy<2 to avoid ABI breaks against compiled wheels (torch, soundfile,
+#   sentencepiece) that haven't all migrated yet.
 
-torch>=2.4
-transformers>=4.45
+torch>=2.4,<2.10
+transformers>=4.45,<5
+accelerate>=0.30
+safetensors>=0.4
+
 huggingface_hub[cli]>=0.25
-soundfile
-librosa
-numpy
+sentencepiece>=0.2
+protobuf>=4
+
+librosa>=0.10
+soundfile>=0.12
+numpy>=1.26,<2

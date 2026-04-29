@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# One-shot setup for running MOSS-Audio-8B-Thinking locally.
+# Stable setup for OpenMOSS-Team/MOSS-Audio-8B-Thinking.
 #
-# This clones the upstream MOSS-Audio repo (which contains the `src` package
-# imported by infer.py), installs dependencies, downloads the 8B-Thinking
-# weights, and copies infer.py into the repo so the imports resolve.
+# Avoids the upstream `[torch-runtime]` extra (which pulls torchaudio +
+# torchcodec and breaks on FFmpeg ABI mismatches). Instead we install
+# a pinned minimal stack from requirements.txt and use librosa for I/O.
 #
-# Run from the directory that contains this script:
+# Usage:
 #     bash setup.sh
+#
+# Idempotent: safe to re-run. Reuses any existing clone and weight dir.
 
 set -euo pipefail
 
@@ -14,34 +16,35 @@ REPO_DIR="MOSS-Audio"
 MODEL_REPO="OpenMOSS-Team/MOSS-Audio-8B-Thinking"
 WEIGHTS_DIR="${REPO_DIR}/weights/MOSS-Audio-8B-Thinking"
 
+# 1. Source tree (provides the `src` package imported by infer.py).
 if [ ! -d "${REPO_DIR}" ]; then
     echo ">>> Cloning OpenMOSS/MOSS-Audio"
     git clone https://github.com/OpenMOSS/MOSS-Audio.git "${REPO_DIR}"
-fi
-
-echo ">>> Installing FFmpeg (needed for audio decoding)"
-if command -v conda >/dev/null 2>&1; then
-    conda install -c conda-forge "ffmpeg=7" -y
 else
-    echo "    conda not found - install FFmpeg manually (e.g. apt install ffmpeg)"
+    echo ">>> Reusing existing clone at ${REPO_DIR}"
 fi
 
-echo ">>> Installing torch + MOSS-Audio runtime"
-pushd "${REPO_DIR}" >/dev/null
-pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e ".[torch-runtime]"
-popd >/dev/null
+# 2. Defensively remove fragile audio deps if a previous attempt installed them.
+echo ">>> Purging torchaudio / torchcodec if present"
+pip uninstall -y torchaudio torchcodec >/dev/null 2>&1 || true
 
-echo ">>> Installing huggingface_hub CLI"
-pip install -U "huggingface_hub[cli]"
+# 3. Install the pinned minimal stack. We deliberately do NOT run
+#    `pip install -e ".[torch-runtime]"` from inside MOSS-Audio - that
+#    extra pulls torchcodec back in.
+echo ">>> Installing pinned minimal stack from requirements.txt"
+pip install --upgrade pip
+pip install -r requirements.txt
 
-if [ ! -d "${WEIGHTS_DIR}" ]; then
-    echo ">>> Downloading ${MODEL_REPO} (~17GB)"
+# 4. Download weights.
+echo ">>> Ensuring weights at ${WEIGHTS_DIR}"
+if [ ! -d "${WEIGHTS_DIR}" ] || [ -z "$(ls -A "${WEIGHTS_DIR}" 2>/dev/null)" ]; then
     hf download "${MODEL_REPO}" --local-dir "${WEIGHTS_DIR}"
 else
-    echo ">>> Weights already present at ${WEIGHTS_DIR}"
+    echo "    Already present - skipping download."
 fi
 
-echo ">>> Copying infer.py into ${REPO_DIR}"
+# 5. Place infer.py inside the MOSS-Audio dir so its `src.*` imports resolve.
+echo ">>> Installing infer_local.py into ${REPO_DIR}"
 cp infer.py "${REPO_DIR}/infer_local.py"
 
 cat <<EOF
@@ -50,7 +53,12 @@ Setup complete.
 
 To run:
     cd ${REPO_DIR}
-    python infer_local.py --audio path/to/clip.mp3 \\
+    python infer_local.py \\
+        --audio path/to/clip.mp3 \\
         --model ./weights/MOSS-Audio-8B-Thinking \\
+        --device auto \\
         --prompt "Describe this audio."
+
+Force CPU on machines without an NVIDIA GPU:
+    python infer_local.py ... --device cpu
 EOF
