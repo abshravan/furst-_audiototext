@@ -69,6 +69,25 @@ python infer_local.py --audio sample.wav --model ./weights/MOSS-Audio-8B-Thinkin
 --no-time-marker  Disable time-marker tokens
 ```
 
+## Audio loading
+
+`infer.py` no longer relies on torchaudio/torchcodec (which needs FFmpeg
+shared libs and often crashes with `libavutil.so.* not found`). It tries
+in order:
+
+1. **soundfile** — handles wav, flac, ogg, mp3 (libsndfile ≥ 1.1).
+2. **librosa** — handles anything soundfile + audioread can read.
+3. **ffmpeg** binary on `$PATH` — final fallback for exotic codecs.
+
+Make sure at least one is available:
+
+```bash
+pip install soundfile librosa
+# and/or
+sudo apt install ffmpeg     # Debian/Ubuntu
+conda install -c conda-forge ffmpeg=7
+```
+
 ## CPU-only mode
 
 If you don't have an NVIDIA GPU, force CPU:

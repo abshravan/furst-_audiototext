@@ -32,11 +32,82 @@ Prerequisites:
 import argparse
 import sys
 
+import numpy as np
 import torch
 
-from src.audio_io import load_audio
 from src.modeling_moss_audio import MossAudioModel
 from src.processing_moss_audio import MossAudioProcessor
+
+
+def load_audio_safe(path: str, sample_rate: int) -> np.ndarray:
+    """Load audio as a mono float32 numpy array at ``sample_rate``.
+
+    Bypasses torchaudio/torchcodec (which needs system FFmpeg shared libs and
+    often breaks on stock installs) by trying soundfile first, then librosa,
+    then ffmpeg via subprocess as a last resort. Returns a 1-D ndarray in [-1, 1].
+    """
+    try:
+        import soundfile as sf  # type: ignore
+        data, sr = sf.read(path, dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if sr != sample_rate:
+            data = _resample(data, sr, sample_rate)
+        return data.astype(np.float32, copy=False)
+    except Exception as sf_err:  # noqa: BLE001 - intentional broad catch
+        last_err = sf_err
+
+    try:
+        import librosa  # type: ignore
+        data, _ = librosa.load(path, sr=sample_rate, mono=True)
+        return data.astype(np.float32, copy=False)
+    except Exception as lr_err:  # noqa: BLE001
+        last_err = lr_err
+
+    # Last resort: shell out to ffmpeg if it exists
+    try:
+        return _load_via_ffmpeg(path, sample_rate)
+    except Exception as ff_err:  # noqa: BLE001
+        raise RuntimeError(
+            f"Could not load {path}. Tried soundfile, librosa, and ffmpeg.\n"
+            f"  soundfile/librosa error: {last_err}\n"
+            f"  ffmpeg error: {ff_err}\n"
+            "Fix: pip install librosa soundfile, or install ffmpeg "
+            "(e.g. 'sudo apt install ffmpeg' / 'conda install -c conda-forge ffmpeg=7')."
+        ) from ff_err
+
+
+def _resample(data: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    if src_sr == dst_sr:
+        return data
+    try:
+        import librosa  # type: ignore
+        return librosa.resample(data, orig_sr=src_sr, target_sr=dst_sr)
+    except Exception:  # noqa: BLE001
+        # Linear interpolation fallback - lower quality but no extra deps.
+        ratio = dst_sr / src_sr
+        new_len = int(round(len(data) * ratio))
+        x_old = np.linspace(0.0, 1.0, num=len(data), endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=new_len, endpoint=False)
+        return np.interp(x_new, x_old, data).astype(np.float32)
+
+
+def _load_via_ffmpeg(path: str, sample_rate: int) -> np.ndarray:
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg binary not found on PATH")
+
+    cmd = [
+        "ffmpeg", "-nostdin", "-loglevel", "error",
+        "-i", path,
+        "-f", "f32le", "-acodec", "pcm_f32le",
+        "-ac", "1", "-ar", str(sample_rate),
+        "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, check=True)
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,7 +200,7 @@ def main() -> int:
         enable_time_marker=not args.no_time_marker,
     )
 
-    raw_audio = load_audio(args.audio, sample_rate=processor.config.mel_sr)
+    raw_audio = load_audio_safe(args.audio, sample_rate=processor.config.mel_sr)
 
     inputs = processor(text=args.prompt, audios=[raw_audio], return_tensors="pt")
     inputs = inputs.to(model.device)
