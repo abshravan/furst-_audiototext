@@ -146,6 +146,7 @@ files are skipped. Pass `--no-resume` to start over.
                     Default: <batch-dir>/_batch_output/.
 --no-recursive      Don't recurse into subdirectories.
 --no-resume         Ignore prior results.json and start fresh.
+--sleep-between N   Pause N seconds between files (default: 10). 0 to disable.
 ```
 
 Supported audio extensions: `.wav .mp3 .flac .ogg .m4a .opus .webm

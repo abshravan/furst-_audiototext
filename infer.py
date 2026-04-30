@@ -393,6 +393,9 @@ def run_batch(args, model, processor, model_path, dtype):
     print(f"[batch] {len(files)} file(s); {len(prior_done)} already done. "
           f"Output: {output_dir}/dashboard.html", file=sys.stderr)
 
+    pending_indices = [i for i, r in enumerate(state["results"]) if r["status"] != "done"]
+    last_pending = pending_indices[-1] if pending_indices else -1
+
     for idx, entry in enumerate(state["results"]):
         if entry["status"] == "done":
             continue
@@ -448,6 +451,11 @@ def run_batch(args, model, processor, model_path, dtype):
         entry["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
         write_state(output_dir, state)
 
+        if args.sleep_between > 0 and idx != last_pending:
+            print(f"[batch]   pausing {args.sleep_between}s before next file ...",
+                  file=sys.stderr, flush=True)
+            time.sleep(args.sleep_between)
+
     state["status"] = "finished"
     state["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
     write_state(output_dir, state)
@@ -485,6 +493,9 @@ def parse_args():
                    help="Don't recurse into subdirectories of --batch-dir.")
     p.add_argument("--no-resume", action="store_true",
                    help="Ignore any existing results.json and start over.")
+    p.add_argument("--sleep-between", type=float, default=10.0,
+                   help="Seconds to pause between files in batch mode "
+                        "(lets CPU/RAM cool down). Default: 10. Set to 0 to disable.")
 
     p.add_argument("--prompt", default="Describe this audio.")
     p.add_argument("--device", default="auto",
