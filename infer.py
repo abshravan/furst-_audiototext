@@ -24,13 +24,13 @@ import json
 import os
 import sys
 import time
-import types
 
-# src/processing_moss_audio.py has a dead `import torchaudio` at module
-# level that breaks on CPU-only hosts (tries to dlopen libcudart).
-# Insert an empty stub BEFORE any src.* import so the real torchaudio
-# package is never loaded.
-sys.modules.setdefault("torchaudio", types.ModuleType("torchaudio"))
+# We do NOT stub torchaudio in sys.modules. transformers' import_utils
+# calls importlib.util.find_spec("torchaudio") at import time; a stub
+# with __spec__ = None makes that raise ValueError. Instead, the
+# upstream's dead `import torchaudio` line is patched out by
+# patch_existing.sh (and the real torchaudio is uninstalled), so
+# nothing tries to import it.
 
 import librosa
 import numpy as np

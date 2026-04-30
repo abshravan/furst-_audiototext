@@ -54,12 +54,22 @@ fi
 # 3. Refresh infer_local.py.
 echo ">>> Refreshing ${REPO_DIR}/infer_local.py"
 cp infer.py "${REPO_DIR}/infer_local.py"
-echo "    Done. Verify line 30 is the torchaudio stub:"
-sed -n '28,32p' "${REPO_DIR}/infer_local.py"
+echo "    Done."
 
-# 4. Remove torchaudio / torchcodec.
+# 4. Remove torchaudio / torchcodec. infer.py no longer stubs torchaudio
+#    in sys.modules (transformers' availability check breaks on stubbed
+#    modules), so torchaudio MUST actually be uninstalled.
 echo ">>> Uninstalling torchaudio / torchcodec"
 pip uninstall -y torchaudio torchcodec 2>/dev/null || true
+
+# 5. Verify torchaudio is really gone (transformers needs find_spec to
+#    return None, which only happens if the package isn't installed).
+if python3 -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('torchaudio') is None else 1)"; then
+    echo "    Verified: torchaudio is not importable. ✓"
+else
+    echo "WARNING: torchaudio is STILL importable in this env." >&2
+    echo "         Run 'pip uninstall -y torchaudio' manually." >&2
+fi
 
 echo ""
 echo "All patches applied. Now run:"
