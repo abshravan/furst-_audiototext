@@ -191,16 +191,11 @@ def load_model_and_processor(model_path, dtype, device, enable_time_marker):
     return model, processor
 
 
-def run_inference(model, processor, audio_path, prompt, gen_kwargs,
-                  stream=True, on_token=None):
-    """Run one audio file through the model.
+def run_inference(model, processor, audio_path, prompt, gen_kwargs):
+    """Run one audio file through the model. Returns the decoded text.
 
-    If stream=True, tokens are streamed via TextIteratorStreamer. Each
-    chunk is appended to stderr so the user sees live progress, and
-    optionally passed to on_token(text_chunk) for callers that want to
-    update a UI / dashboard incrementally.
-
-    Returns the full decoded text.
+    Pure sequential: no threads, no streaming. The model.generate() call
+    blocks until done, then we decode and return.
     """
     sample_rate = getattr(getattr(processor, "config", None), "mel_sr", None) or 16000
     raw_audio = load_audio(audio_path, sample_rate=sample_rate)
@@ -211,47 +206,10 @@ def run_inference(model, processor, audio_path, prompt, gen_kwargs,
     if hasattr(processor, "audio_token_id"):
         inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
 
-    if not stream:
-        with torch.no_grad():
-            generated_ids = model.generate(**inputs, **gen_kwargs)
-        input_len = inputs["input_ids"].shape[1]
-        return processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
-
-    # Streaming path: run generate() in a thread so we can iterate on tokens.
-    import threading
-    from transformers import TextIteratorStreamer
-
-    tokenizer = getattr(processor, "tokenizer", processor)
-    try:
-        streamer = TextIteratorStreamer(tokenizer, skip_prompt=True,
-                                        skip_special_tokens=True)
-    except Exception:
-        # Tokenizer doesn't satisfy TextIteratorStreamer's expectations.
-        # Fall back to non-streaming.
-        with torch.no_grad():
-            generated_ids = model.generate(**inputs, **gen_kwargs)
-        input_len = inputs["input_ids"].shape[1]
-        return processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
-
-    gen_thread_kwargs = {**inputs, **gen_kwargs, "streamer": streamer}
-
-    def _generate():
-        with torch.no_grad():
-            model.generate(**gen_thread_kwargs)
-
-    thread = threading.Thread(target=_generate, daemon=True)
-    thread.start()
-
-    output = ""
-    print("[infer]   > ", end="", file=sys.stderr, flush=True)
-    for chunk in streamer:
-        output += chunk
-        print(chunk, end="", file=sys.stderr, flush=True)
-        if on_token is not None:
-            on_token(chunk)
-    print("", file=sys.stderr, flush=True)
-    thread.join()
-    return output
+    with torch.no_grad():
+        generated_ids = model.generate(**inputs, **gen_kwargs)
+    input_len = inputs["input_ids"].shape[1]
+    return processor.decode(generated_ids[0, input_len:], skip_special_tokens=True)
 
 
 # ---------------------------------------------------------------------------
@@ -458,50 +416,21 @@ def run_batch(args, model, processor, model_path, dtype):
         t0 = time.time()
         print(f"[batch] [{idx+1}/{len(files)}] {entry['path']}", file=sys.stderr)
 
-        # Heartbeat thread: prints elapsed time every 10s so the user can
-        # see the process is alive even if token streaming is silent.
-        import threading
-        stop_hb = threading.Event()
-
-        def _heartbeat():
-            while not stop_hb.wait(timeout=10):
-                elapsed = int(time.time() - t0)
-                load = os.getloadavg()[0] if hasattr(os, "getloadavg") else -1
-                print(f"[batch]   ... still working ({elapsed}s elapsed, "
-                      f"load avg {load:.1f})", file=sys.stderr, flush=True)
-
-        hb = threading.Thread(target=_heartbeat, daemon=True)
-        hb.start()
-
-        # Stream tokens into the dashboard live so partial output shows up.
-        def _on_token(chunk):
-            entry["output"] += chunk
-            # Throttle disk writes: only update dashboard every ~1.5s
-            now = time.time()
-            if now - _on_token._last_flush > 1.5:
-                _on_token._last_flush = now
-                write_state(output_dir, state)
-        _on_token._last_flush = 0.0
-
         try:
             output = run_inference(model, processor, entry["path"],
-                                   args.prompt, gen_kwargs,
-                                   stream=not args.no_stream,
-                                   on_token=_on_token if not args.no_stream else None)
+                                   args.prompt, gen_kwargs)
             entry["status"] = "done"
             entry["output"] = output
             entry["error"] = ""
-        except Exception as exc:  # noqa: BLE001 - we want to keep going
+        except Exception as exc:  # noqa: BLE001 - keep going on per-file errors
             entry["status"] = "error"
             entry["error"] = f"{type(exc).__name__}: {exc}"
             print(f"[batch]   ERROR: {entry['error']}", file=sys.stderr)
-        finally:
-            stop_hb.set()
-            hb.join(timeout=1)
 
         entry["duration_sec"] = round(time.time() - t0, 2)
         entry["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
         write_state(output_dir, state)
+        print(f"[batch]   done in {entry['duration_sec']:.1f}s", file=sys.stderr)
 
         if args.sleep_between > 0 and idx != last_pending:
             print(f"[batch]   pausing {args.sleep_between}s before next file ...",
@@ -561,8 +490,6 @@ def parse_args():
                    choices=["auto", "float16", "float32", "bfloat16"])
     p.add_argument("--max-new-tokens", type=int, default=256,
                    help="Generation cap. Lower = faster. Default: 256.")
-    p.add_argument("--no-stream", action="store_true",
-                   help="Disable live token streaming (silent until done).")
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--top-p", type=float, default=1.0)
     p.add_argument("--top-k", type=int, default=50)
@@ -632,10 +559,8 @@ def main():
         gen_kwargs=dict(max_new_tokens=args.max_new_tokens, do_sample=True,
                         num_beams=1, temperature=args.temperature,
                         top_p=args.top_p, top_k=args.top_k, use_cache=True),
-        stream=not args.no_stream,
     )
-    if args.no_stream:
-        print(output)
+    print(output)
     return 0
 
 
