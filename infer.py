@@ -25,6 +25,43 @@ import os
 import sys
 import time
 
+# IMPORTANT: thread env vars MUST be set BEFORE `import torch`. PyTorch
+# reads OMP_NUM_THREADS / MKL_NUM_THREADS at OpenMP init; calling
+# torch.set_num_threads() afterwards only resizes the pool, it cannot
+# undo a OMP_NUM_THREADS=1 that was already in the env. We default to
+# the physical core count (excluding hyperthreads). Hyperthreads
+# typically *hurt* matmul-bound inference because the two siblings
+# fight for the same FP units.
+
+def _physical_core_count():
+    """Return physical CPU cores; fall back to logical count."""
+    try:
+        cores = set()
+        phys_id = core_id = None
+        with open("/proc/cpuinfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("physical id"):
+                    phys_id = line.split(":", 1)[1].strip()
+                elif line.startswith("core id"):
+                    core_id = line.split(":", 1)[1].strip()
+                elif not line.strip() and phys_id is not None:
+                    cores.add((phys_id, core_id))
+                    phys_id = core_id = None
+        if cores:
+            return len(cores)
+    except (FileNotFoundError, OSError):
+        pass
+    return os.cpu_count() or 4
+
+_DEFAULT_THREADS = str(_physical_core_count())
+for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, _DEFAULT_THREADS)
+# Bind threads to physical cores so the OS doesn't shuffle them across
+# E-cores / hyperthread siblings mid-matmul.
+os.environ.setdefault("OMP_PROC_BIND", "close")
+os.environ.setdefault("OMP_PLACES", "cores")
+
 # We do NOT stub torchaudio in sys.modules. transformers' import_utils
 # calls importlib.util.find_spec("torchaudio") at import time; a stub
 # with __spec__ = None makes that raise ValueError. Instead, the
@@ -35,6 +72,12 @@ import time
 import librosa
 import numpy as np
 import torch
+
+# oneDNN / mkldnn handle most CPU matmul kernels — make sure it's on.
+try:
+    torch.backends.mkldnn.enabled = True
+except AttributeError:
+    pass
 
 from src.modeling_moss_audio import MossAudioModel
 from src.processing_moss_audio import MossAudioProcessor
@@ -104,15 +147,24 @@ def resolve_device(requested):
 
 def resolve_dtype(requested, device):
     if requested == "auto":
-        return torch.bfloat16 if device.startswith("cuda") else torch.float16
+        # bfloat16 is the right CPU default: same memory as fp16 but with
+        # better oneDNN kernel support. fp16 on CPU is usually emulated
+        # via fp32 upcast and ends up slower despite the smaller weights.
+        return torch.bfloat16 if device.startswith("cuda") else torch.bfloat16
     return {"float32": torch.float32, "float16": torch.float16,
             "bfloat16": torch.bfloat16}[requested]
 
 
-def configure_cpu_threads():
-    n = os.cpu_count() or 4
+def configure_cpu_threads(requested=None):
+    """Set torch's thread pool. Defaults to physical cores."""
+    n = requested if requested else _physical_core_count()
     torch.set_num_threads(n)
-    torch.set_num_interop_threads(2)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # set_num_interop_threads can only be called once before any
+        # parallel work happens; ignore if it's already locked in.
+        pass
     return n
 
 
@@ -500,6 +552,11 @@ def parse_args():
     p.add_argument("--prompt", default="Describe this audio.")
     p.add_argument("--device", default="auto",
                    help="'auto', 'cpu', 'cuda', or 'cuda:N'.")
+    p.add_argument("--threads", type=int, default=None,
+                   help=f"CPU threads for torch (default: physical cores = "
+                        f"{_physical_core_count()}). Try the physical-core "
+                        f"count, not logical — hyperthreads usually hurt "
+                        f"matmul-bound inference.")
     p.add_argument("--dtype", default="auto",
                    choices=["auto", "float16", "float32", "bfloat16"])
     p.add_argument("--max-new-tokens", type=int, default=256,
@@ -534,18 +591,28 @@ def main():
     dtype = resolve_dtype(args.dtype, device)
 
     if device == "cpu":
-        n_threads = configure_cpu_threads()
+        n_threads = configure_cpu_threads(args.threads)
         est_gb = ram_estimate_gb(dtype, params)
         sys_gb = round(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
                        / 1024 ** 3, 1)
+        logical = os.cpu_count() or n_threads
         print(f"[infer] model={model_path}  params=~{round(params/1e9, 1)}B",
               file=sys.stderr)
-        print(f"[infer] device=cpu  dtype={dtype}  threads={n_threads}",
+        print(f"[infer] device=cpu  dtype={dtype}  "
+              f"threads={n_threads} (physical cores; logical={logical})",
+              file=sys.stderr)
+        print(f"[infer] OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS')} "
+              f"MKL_NUM_THREADS={os.environ.get('MKL_NUM_THREADS')} "
+              f"mkldnn={getattr(torch.backends.mkldnn, 'enabled', '?')}",
               file=sys.stderr)
         print(f"[infer] estimated model RAM: ~{est_gb} GB (system has {sys_gb} GB)",
               file=sys.stderr)
         if est_gb > sys_gb - 4:
             print("[infer] WARNING: model may not fit. Try --variant 4b-instruct.",
+                  file=sys.stderr)
+        if dtype == torch.float16:
+            print("[infer] NOTE: float16 on CPU is usually slower than bfloat16 "
+                  "(same memory). Drop --dtype to use auto/bfloat16.",
                   file=sys.stderr)
     else:
         print(f"[infer] model={model_path}  device={device}  dtype={dtype}",
