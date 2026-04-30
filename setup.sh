@@ -77,8 +77,11 @@ else
 fi
 
 # 6. Place infer.py inside the MOSS-Audio dir so its `src.*` imports resolve.
-echo ">>> Installing infer_local.py into ${REPO_DIR}"
-cp infer.py "${REPO_DIR}/infer_local.py"
+#    Use a symlink so infer_local.py always reflects the latest infer.py
+#    without needing a manual cp after every git pull.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo ">>> Symlinking ${REPO_DIR}/infer_local.py -> ${SCRIPT_DIR}/infer.py"
+ln -sf "${SCRIPT_DIR}/infer.py" "${REPO_DIR}/infer_local.py"
 
 cat <<EOF
 

@@ -51,9 +51,10 @@ else
     echo "    None found - all clear."
 fi
 
-# 3. Refresh infer_local.py.
-echo ">>> Refreshing ${REPO_DIR}/infer_local.py"
-cp infer.py "${REPO_DIR}/infer_local.py"
+# 3. Point infer_local.py at infer.py via symlink so it never goes stale.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo ">>> Symlinking ${REPO_DIR}/infer_local.py -> ${SCRIPT_DIR}/infer.py"
+ln -sf "${SCRIPT_DIR}/infer.py" "${REPO_DIR}/infer_local.py"
 echo "    Done."
 
 # 4. Remove torchaudio / torchcodec. infer.py no longer stubs torchaudio

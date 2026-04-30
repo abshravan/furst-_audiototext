@@ -150,12 +150,14 @@ def run_inference(model, processor, audio_path, prompt, gen_kwargs,
 
     Returns the full decoded text.
     """
-    raw_audio = load_audio(audio_path, sample_rate=processor.config.mel_sr)
+    sample_rate = getattr(getattr(processor, "config", None), "mel_sr", None) or 16000
+    raw_audio = load_audio(audio_path, sample_rate=sample_rate)
     inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
     inputs = inputs.to(model.device)
     if inputs.get("audio_data") is not None:
         inputs["audio_data"] = inputs["audio_data"].to(model.dtype)
-    inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
+    if hasattr(processor, "audio_token_id"):
+        inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
 
     if not stream:
         with torch.no_grad():
