@@ -73,6 +73,19 @@ import librosa
 import numpy as np
 import torch
 
+# When this file is invoked via symlink (e.g. MOSS-Audio/infer_local.py
+# -> ../infer.py), Python 3.11+ resolves sys.path[0] to the symlink
+# *target*'s directory (this repo root), not the invocation directory.
+# That breaks `from src.* import ...` because src/ lives next to the
+# symlink, not the target. Add the cwd + the symlink's own directory
+# to sys.path so the import works in both cases.
+for _p in (
+    os.getcwd(),
+    os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else "",
+):
+    if _p and _p not in sys.path:
+        sys.path.insert(0, _p)
+
 # oneDNN / mkldnn handle most CPU matmul kernels — make sure it's on.
 try:
     torch.backends.mkldnn.enabled = True
