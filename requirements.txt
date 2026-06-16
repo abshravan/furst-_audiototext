@@ -5,7 +5,11 @@
 #   sentencepiece) that haven't all migrated yet.
 
 torch>=2.4,<2.10
-transformers>=4.45,<5
+# Pin transformers to the version upstream MOSS-Audio tests against
+# (per their pyproject.toml). Newer Whisper API in 4.58+ has GQA-shaped
+# Q/K/V projections that MOSS-Audio's vendored audio encoder doesn't
+# handle, producing 'tensor a (50) must match tensor b (20)' at runtime.
+transformers==4.57.1
 accelerate>=0.30
 safetensors>=0.4
 
