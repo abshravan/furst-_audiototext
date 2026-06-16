@@ -192,29 +192,29 @@ def ram_estimate_gb(dtype, params):
 
 def load_model_and_processor(model_path, dtype, device, enable_time_marker):
     print(f"[infer] Loading model weights with dtype={dtype} ...", file=sys.stderr)
-    # transformers renamed torch_dtype -> dtype in 4.50+. Newer versions
-    # silently ignore torch_dtype in some load paths, leaving the model
-    # in float32 (~16 GB for a 4B model) and OOMing tiny GPUs. Pass both
-    # names so it works regardless of transformers version.
     load_kwargs = dict(
         trust_remote_code=True,
         device_map=device,
         low_cpu_mem_usage=True,
     )
+    # transformers renamed torch_dtype -> dtype in 4.50+. Try the new name
+    # first, fall back to the old name on older versions.
     try:
         model = MossAudioModel.from_pretrained(
             model_path, dtype=dtype, **load_kwargs,
         )
     except TypeError:
-        # Older transformers: 'dtype' kwarg not recognized.
         model = MossAudioModel.from_pretrained(
             model_path, torch_dtype=dtype, **load_kwargs,
         )
-    # Defensive: force-cast in case from_pretrained ignored the dtype hint.
+    # Don't force-cast: model.to(dtype) downcasts ALL buffers including
+    # ones that need fp32 (e.g. RoPE inv_freq), which silently breaks
+    # certain forward passes. Just warn if the dtype didn't take.
     if model.dtype != dtype:
-        print(f"[infer] WARN: model loaded as {model.dtype}, casting to {dtype}",
+        print(f"[infer] WARN: model loaded as {model.dtype} (requested {dtype}). "
+              f"If this OOMs, your transformers version is ignoring the dtype kwarg.",
               file=sys.stderr)
-        model = model.to(dtype)
+    print(f"[infer] Loaded. model.dtype={model.dtype}", file=sys.stderr)
     model.eval()
     processor = MossAudioProcessor.from_pretrained(
         model_path, trust_remote_code=True,
@@ -229,14 +229,34 @@ def run_inference(model, processor, audio_path, prompt, gen_kwargs):
     Pure sequential: no threads, no streaming. The model.generate() call
     blocks until done, then we decode and return.
     """
-    sample_rate = getattr(getattr(processor, "config", None), "mel_sr", None) or 16000
+    # Use processor.config.mel_sr strictly — guessing the sample rate
+    # (e.g. 16000 vs 24000) causes a feature-count mismatch with the
+    # number of <audio> token placeholders the processor inserts,
+    # which manifests as cryptic shape errors deep in the model.
+    sample_rate = processor.config.mel_sr
     raw_audio = load_audio(audio_path, sample_rate=sample_rate)
     inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
     inputs = inputs.to(model.device)
     if inputs.get("audio_data") is not None:
         inputs["audio_data"] = inputs["audio_data"].to(model.dtype)
-    if hasattr(processor, "audio_token_id"):
-        inputs["audio_input_mask"] = inputs["input_ids"] == processor.audio_token_id
+    # Match upstream: build the mask unconditionally from input_ids.
+    audio_input_mask = inputs["input_ids"] == processor.audio_token_id
+    inputs["audio_input_mask"] = audio_input_mask
+
+    # Diagnostic: log audio/token shapes once so a mismatch is visible.
+    if not getattr(run_inference, "_shape_logged", False):
+        audio_data = inputs.get("audio_data")
+        print(f"[infer] DIAG audio_path={audio_path}", file=sys.stderr)
+        print(f"[infer] DIAG raw_audio.shape={raw_audio.shape}  sample_rate={sample_rate}",
+              file=sys.stderr)
+        print(f"[infer] DIAG input_ids.shape={inputs['input_ids'].shape}  "
+              f"audio_token_count={int(audio_input_mask.sum())}  "
+              f"audio_token_id={processor.audio_token_id}",
+              file=sys.stderr)
+        if audio_data is not None:
+            print(f"[infer] DIAG audio_data.shape={audio_data.shape}",
+                  file=sys.stderr)
+        run_inference._shape_logged = True
 
     with torch.no_grad():
         generated_ids = model.generate(**inputs, **gen_kwargs)
