@@ -191,11 +191,30 @@ def ram_estimate_gb(dtype, params):
 # ---------------------------------------------------------------------------
 
 def load_model_and_processor(model_path, dtype, device, enable_time_marker):
-    print("[infer] Loading model weights ...", file=sys.stderr)
-    model = MossAudioModel.from_pretrained(
-        model_path, trust_remote_code=True,
-        torch_dtype=dtype, device_map=device, low_cpu_mem_usage=True,
+    print(f"[infer] Loading model weights with dtype={dtype} ...", file=sys.stderr)
+    # transformers renamed torch_dtype -> dtype in 4.50+. Newer versions
+    # silently ignore torch_dtype in some load paths, leaving the model
+    # in float32 (~16 GB for a 4B model) and OOMing tiny GPUs. Pass both
+    # names so it works regardless of transformers version.
+    load_kwargs = dict(
+        trust_remote_code=True,
+        device_map=device,
+        low_cpu_mem_usage=True,
     )
+    try:
+        model = MossAudioModel.from_pretrained(
+            model_path, dtype=dtype, **load_kwargs,
+        )
+    except TypeError:
+        # Older transformers: 'dtype' kwarg not recognized.
+        model = MossAudioModel.from_pretrained(
+            model_path, torch_dtype=dtype, **load_kwargs,
+        )
+    # Defensive: force-cast in case from_pretrained ignored the dtype hint.
+    if model.dtype != dtype:
+        print(f"[infer] WARN: model loaded as {model.dtype}, casting to {dtype}",
+              file=sys.stderr)
+        model = model.to(dtype)
     model.eval()
     processor = MossAudioProcessor.from_pretrained(
         model_path, trust_remote_code=True,
