@@ -235,6 +235,19 @@ def run_inference(model, processor, audio_path, prompt, gen_kwargs):
     # which manifests as cryptic shape errors deep in the model.
     sample_rate = processor.config.mel_sr
     raw_audio = load_audio(audio_path, sample_rate=sample_rate)
+
+    # MOSS-Audio models have a fixed positional encoding limit on the
+    # audio side. Long clips (e.g. >30s) overflow that and trigger
+    # cryptic shape mismatches deep in the audio encoder. Truncate.
+    max_audio_secs = float(os.environ.get("MOSS_MAX_AUDIO_SECS", "30"))
+    max_samples = int(max_audio_secs * sample_rate)
+    if raw_audio.shape[0] > max_samples:
+        secs = raw_audio.shape[0] / sample_rate
+        print(f"[infer] WARN: audio is {secs:.1f}s, truncating to "
+              f"{max_audio_secs:.0f}s (override with MOSS_MAX_AUDIO_SECS env var)",
+              file=sys.stderr)
+        raw_audio = raw_audio[:max_samples]
+
     inputs = processor(text=prompt, audios=[raw_audio], return_tensors="pt")
     inputs = inputs.to(model.device)
     if inputs.get("audio_data") is not None:
@@ -475,9 +488,12 @@ def run_batch(args, model, processor, model_path, dtype):
             entry["output"] = output
             entry["error"] = ""
         except Exception as exc:  # noqa: BLE001 - keep going on per-file errors
+            import traceback
+            tb = traceback.format_exc()
             entry["status"] = "error"
-            entry["error"] = f"{type(exc).__name__}: {exc}"
-            print(f"[batch]   ERROR: {entry['error']}", file=sys.stderr)
+            entry["error"] = f"{type(exc).__name__}: {exc}\n{tb}"
+            print(f"[batch]   ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(tb, file=sys.stderr)
 
         entry["duration_sec"] = round(time.time() - t0, 2)
         entry["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
