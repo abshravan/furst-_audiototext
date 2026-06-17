@@ -84,6 +84,12 @@ class AudioInferenceBackend:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._mem_cache: dict[str, str] = {}
 
+    def __deepcopy__(self, memo: dict) -> "AudioInferenceBackend":
+        # The GPU model can't be deep-copied and shouldn't be — one instance
+        # is intentional. Tell DSPy's bootstrap machinery to reuse this object.
+        memo[id(self)] = self
+        return self
+
     def _cache_key(self, audio_path: str, prompt: str) -> str:
         """Stable hash over (absolute audio path, prompt, generation kwargs)."""
         h = hashlib.sha256()
