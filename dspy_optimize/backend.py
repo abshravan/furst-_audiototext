@@ -23,16 +23,16 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Make the repo root importable so `import infer` works regardless of
-# where this package is launched from.
+# Make the repo root importable so `import infer` finds OUR infer.py first.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Also make MOSS-Audio's src/ importable when running outside that dir.
+# Make MOSS-Audio's src/ importable, but append (not insert) so that
+# MOSS-Audio/infer.py never shadows the repo-root infer.py.
 _MOSS_DIR = _REPO_ROOT / "MOSS-Audio"
 if _MOSS_DIR.is_dir() and str(_MOSS_DIR) not in sys.path:
-    sys.path.insert(0, str(_MOSS_DIR))
+    sys.path.append(str(_MOSS_DIR))
 
 import torch  # noqa: E402  (must come after sys.path massaging)
 
