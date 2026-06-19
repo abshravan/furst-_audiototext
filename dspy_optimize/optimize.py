@@ -82,6 +82,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-new-tokens", type=int, default=256)
     p.add_argument("--verbose", action="store_true",
                    help="Print per-example results during evaluation.")
+    p.add_argument("--no-full-eval", action="store_true",
+                   help="Skip the extra evaluation on the FULL labels.csv "
+                        "(by default we also report metrics on all 34 examples, "
+                        "not just the 10-example val split — useful for spotting "
+                        "overfitting to a particular val seed).")
     return p.parse_args()
 
 
@@ -207,12 +212,46 @@ def main() -> int:
     optimized.save(str(out_path))
     print(f"\n[dspy] Saved optimized program to {out_path}", file=sys.stderr)
 
-    # 8. Comparison report.
+    # 8. Comparison report on the held-out VAL split.
     print()
     print("============================================================")
-    print(" COMPARISON")
+    print(f" COMPARISON — VAL SPLIT ({len(val)} examples)")
     print("============================================================")
     print(format_comparison(baseline_report, optimized_report))
+
+    # 9. Optional: also evaluate both programs on the FULL labels.csv.
+    #    Train examples are cached after step 5, val examples after step 6,
+    #    so this adds zero new GPU work for the OPTIMIZED program — and at
+    #    most `len(train)` extra inference calls for the BASELINE.
+    if not args.no_full_eval:
+        print(f"\n[dspy] Evaluating BASELINE on FULL set ({len(examples)} examples) ...",
+              file=sys.stderr)
+        t0 = time.time()
+        baseline_full = evaluate_program(detector, examples, verbose=args.verbose)
+        print(f"[dspy] Baseline full-set eval took {time.time() - t0:.1f}s",
+              file=sys.stderr)
+
+        print(f"\n[dspy] Evaluating OPTIMIZED on FULL set ({len(examples)} examples) ...",
+              file=sys.stderr)
+        t0 = time.time()
+        optimized_full = evaluate_program(optimized, examples, verbose=args.verbose)
+        print(f"[dspy] Optimized full-set eval took {time.time() - t0:.1f}s",
+              file=sys.stderr)
+
+        print()
+        print(format_report("BASELINE  (full)", baseline_full))
+        print()
+        print(format_report("OPTIMIZED (full)", optimized_full))
+        print()
+        print("============================================================")
+        print(f" COMPARISON — FULL DATASET ({len(examples)} examples)")
+        print("============================================================")
+        print(format_comparison(baseline_full, optimized_full))
+        print()
+        print("NOTE: full-dataset metrics include the train split the optimizer")
+        print("saw during compilation, so they're optimistic. The VAL-SPLIT")
+        print("comparison above is the honest estimate of generalization.")
+
     print()
     stats = backend.cache_stats()
     print(f"[dspy] Cache: {stats['disk_entries']} entries on disk at "
