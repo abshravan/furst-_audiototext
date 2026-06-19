@@ -6,6 +6,11 @@ Returning a bool (rather than a 0..1 score) makes BootstrapFewShot's
 demo filtering straightforward: kept demos are the ones where the model
 got the answer right.
 
+`frustration_metric_with_feedback` is GEPA-shaped: it returns a
+`dspy.Prediction(score=..., feedback=...)`. GEPA hands the feedback
+string to the reflection LM, which uses it to propose instruction
+rewrites. Richer feedback => better prompt evolution.
+
 `evaluate_program` computes accuracy / precision / recall / F1 on a
 held-out validation set — these are the numbers we report when comparing
 the baseline (unoptimized) vs the optimized program.
@@ -33,6 +38,59 @@ def frustration_metric(example, pred, trace=None) -> bool:
     gold = (example.frustration or "").strip().lower()
     actual = (pred.frustration or "").strip().lower()
     return gold == actual
+
+
+def frustration_metric_with_feedback(
+    example, pred, trace=None, pred_name=None, pred_trace=None,
+):
+    """GEPA-shaped metric. Returns score + natural-language feedback.
+
+    The feedback string is what GEPA's reflection LM reads to reason
+    about *why* the prediction was wrong. The more specific we are, the
+    better the prompt rewrites become. We surface:
+      * gold vs predicted label
+      * the model's own reasoning (if it gave one)
+      * concrete guidance about which direction the classifier missed
+    """
+    gold = (example.frustration or "").strip().lower()
+    actual = (pred.frustration or "").strip().lower()
+    correct = (gold == actual)
+    score = 1.0 if correct else 0.0
+    reason = getattr(pred, "reason", "") or "(no reason given)"
+    confidence = getattr(pred, "confidence", "") or "(no confidence given)"
+    audio_path = getattr(example, "audio_path", "(unknown audio)")
+
+    if correct:
+        feedback = (
+            f"Correct: model labeled '{actual}' for {audio_path}. "
+            f"Confidence={confidence}. Reasoning: {reason}"
+        )
+    elif gold == "yes" and actual == "no":
+        feedback = (
+            f"FALSE NEGATIVE on {audio_path}. The patient IS frustrated "
+            f"but the model labeled 'no'. Model said: '{reason}'. "
+            f"The classifier is being too conservative — it is missing "
+            f"frustration cues like raised pitch, sighs, sharp word "
+            f"choice, repeated complaints, or interruptions. The "
+            f"instruction should push the model to weigh subtle acoustic "
+            f"cues more heavily and not require explicit angry words."
+        )
+    elif gold == "no" and actual == "yes":
+        feedback = (
+            f"FALSE POSITIVE on {audio_path}. The patient is NOT "
+            f"frustrated but the model labeled 'yes'. Model said: "
+            f"'{reason}'. The classifier is over-triggering — it is "
+            f"confusing normal questioning, concern, or assertiveness "
+            f"with frustration. The instruction should clarify that "
+            f"frustration requires sustained negative affect, not just "
+            f"a single emphatic word or an inquisitive tone."
+        )
+    else:
+        feedback = (
+            f"Incorrect prediction on {audio_path}: gold={gold} "
+            f"pred={actual}. Reasoning: {reason}"
+        )
+    return dspy.Prediction(score=score, feedback=feedback)
 
 
 # ---------------------------------------------------------------------------

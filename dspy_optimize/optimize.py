@@ -11,8 +11,7 @@ Usage:
 Defaults: BootstrapFewShot, val_ratio=0.3, max_bootstrapped_demos=3.
 
 Why BootstrapFewShot is the default:
-  * Needs no second LM (MIPROv2 requires one to generate instruction
-    candidates).
+  * Needs no second LM (MIPROv2 and GEPA both require one).
   * Quickly tries small numbers of demos, evaluates with our metric,
     and keeps the best subset. Cheap enough to run on CPU.
 
@@ -22,6 +21,14 @@ Why you might switch to --optimizer mipro:
     model can't re-hear them), instruction optimization is the real
     win. Cost: needs a text LM (configure via DSPY_PROMPT_MODEL env
     var, e.g. `openai/gpt-4o-mini`) and runs many more trials.
+
+Why you might switch to --optimizer gepa (recommended for small sets):
+  * GEPA evolves the instruction by *reflecting* on failures with a
+    reflection LM that reads natural-language feedback per example. It
+    typically beats MIPROv2 on small datasets because it learns from
+    why each prediction was wrong, not just whether it was wrong.
+    Cost: needs DSPY_PROMPT_MODEL and the matching API key, and is
+    the most expensive of the three (many reflection-LM calls).
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ from .metrics import (
     format_comparison,
     format_report,
     frustration_metric,
+    frustration_metric_with_feedback,
 )
 from .module import FrustrationDetector
 
@@ -54,11 +62,17 @@ def parse_args() -> argparse.Namespace:
                    help="CSV with audio_path,frustration columns.")
     p.add_argument("--output", default="dspy_optimize/optimized_program.json",
                    help="Where to save the optimized program JSON.")
-    p.add_argument("--optimizer", choices=["bootstrap", "mipro"], default="bootstrap",
+    p.add_argument("--optimizer", choices=["bootstrap", "mipro", "gepa"],
+                   default="bootstrap",
                    help="Which DSPy optimizer to use.")
     p.add_argument("--max-demos", type=int, default=3,
                    help="Max few-shot demos to include (bootstrap only). "
                         "Keep low for audio because demos can't include audio data.")
+    p.add_argument("--gepa-budget", default="light",
+                   choices=["light", "medium", "heavy"],
+                   help="GEPA search budget. 'light' = ~few dozen reflection "
+                        "calls; 'heavy' = hundreds. Cost scales with reflection-LM "
+                        "tokens.")
     p.add_argument("--val-ratio", type=float, default=0.3,
                    help="Fraction of dataset reserved for validation.")
     p.add_argument("--seed", type=int, default=42)
@@ -94,19 +108,30 @@ def main() -> int:
           f"Train={len(train)}  Val={len(val)}", file=sys.stderr)
 
     # 3. DSPy requires *some* LM in settings even if our Module bypasses it.
-    #    Use a no-op for bootstrap; for mipro, swap in a real text LM.
+    #    Use a no-op for bootstrap; for mipro and gepa, swap in a real text LM.
+    reflection_lm = None
     if args.optimizer == "bootstrap":
         dspy.settings.configure(lm=_NullLM())
     else:
         prompt_model_name = os.environ.get("DSPY_PROMPT_MODEL")
         if not prompt_model_name:
             raise SystemExit(
-                "MIPROv2 needs a text LM to generate instruction candidates. "
+                f"{args.optimizer.upper()} needs a text LM. "
                 "Set DSPY_PROMPT_MODEL (e.g. 'openai/gpt-4o-mini') and ensure "
                 "the matching API key env var is set (OPENAI_API_KEY, etc.)."
             )
         prompt_lm = dspy.LM(prompt_model_name)
         dspy.settings.configure(lm=prompt_lm)
+        # GEPA wants a separate handle for the reflection LM (it can be the
+        # same model, but DSPy keeps them as distinct knobs). Allow override
+        # via DSPY_REFLECTION_MODEL for users who want a stronger reflector.
+        if args.optimizer == "gepa":
+            reflection_model_name = os.environ.get(
+                "DSPY_REFLECTION_MODEL", prompt_model_name,
+            )
+            reflection_lm = dspy.LM(
+                reflection_model_name, temperature=1.0, max_tokens=8000,
+            )
 
     detector = FrustrationDetector(backend)
 
@@ -131,7 +156,7 @@ def main() -> int:
             max_labeled_demos=args.max_demos,
         )
         optimized = optimizer.compile(detector, trainset=train)
-    else:
+    elif args.optimizer == "mipro":
         from dspy.teleprompt import MIPROv2
         optimizer = MIPROv2(
             metric=frustration_metric,
@@ -142,6 +167,28 @@ def main() -> int:
             trainset=train,
             valset=val,
             requires_permission_to_run=False,
+        )
+    else:  # gepa
+        # GEPA learns by reflecting on per-example feedback strings. It
+        # tries instruction variants, scores them with our metric, keeps
+        # a Pareto frontier of candidates, and asks the reflection LM to
+        # propose new instructions based on failures it saw.
+        try:
+            from dspy.teleprompt import GEPA
+        except ImportError as exc:
+            raise SystemExit(
+                "GEPA requires dspy>=2.6 (preferably >=3.0). "
+                f"Current import failed: {exc}. Run: pip install -U 'dspy-ai>=3.0'"
+            ) from exc
+        optimizer = GEPA(
+            metric=frustration_metric_with_feedback,
+            auto=args.gepa_budget,
+            reflection_lm=reflection_lm,
+        )
+        optimized = optimizer.compile(
+            detector,
+            trainset=train,
+            valset=val,
         )
     print(f"[dspy] Optimization took {time.time() - t0:.1f}s", file=sys.stderr)
 

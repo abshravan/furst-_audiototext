@@ -10,6 +10,7 @@ classification.
 |---|---|---|
 | **BootstrapFewShot** (default) | Inserts up to N few-shot demos drawn from your training set | Small datasets, no extra LM needed. Demos with audio inputs are inert (the model can't re-hear them) so the win is mostly *output-format consistency*. |
 | **MIPROv2** | Rewrites the instruction text itself, optionally adds demos | Real prompt-text optimization. Needs a second text LM (e.g. `openai/gpt-4o-mini`) to propose instruction candidates. Higher compute cost. |
+| **GEPA** | Evolves the instruction by *reflecting* on per-example failures, then proposing rewrites; keeps a Pareto frontier of variants | Strongest results on small (<50) datasets. The reflection LM reads natural-language feedback ("FALSE NEGATIVE: model missed sighs and raised pitch...") and proposes targeted instruction edits. Needs `DSPY_PROMPT_MODEL`; most expensive of the three. |
 
 ## Setup
 
@@ -47,6 +48,38 @@ python -m dspy_optimize.optimize \
     --labels dspy_optimize/labels.csv \
     --optimizer mipro
 ```
+
+## Train with GEPA (reflection-based prompt evolution)
+
+GEPA reads natural-language feedback for each failed prediction and
+asks a reflection LM to rewrite the instruction. It typically beats
+MIPROv2 on small datasets because it learns from *why* something was
+wrong, not just *whether*.
+
+```bash
+export DSPY_PROMPT_MODEL='openai/gpt-4o-mini'
+export OPENAI_API_KEY='sk-...'
+
+# Optional: use a stronger model just for reflection (rewrites)
+# while keeping the cheaper one for everything else.
+# export DSPY_REFLECTION_MODEL='openai/gpt-4o'
+
+python -m dspy_optimize.optimize \
+    --model ./MOSS-Audio/weights/MOSS-Audio-4B-Instruct \
+    --labels dspy_optimize/labels.csv \
+    --optimizer gepa \
+    --gepa-budget light \
+    --device cuda --dtype float16
+```
+
+`--gepa-budget` controls how many reflection rounds GEPA runs:
+* `light` — ~few dozen reflection calls. Best starting point.
+* `medium` — ~hundreds.
+* `heavy` — full search; can run for hours on a small dataset.
+
+Each reflection call hits your text LM (paid API tokens). The audio
+model itself is still cached by `AudioInferenceBackend`, so GEPA only
+pays for new `(audio, prompt)` combinations it hasn't tried yet.
 
 ## Evaluate a saved program
 
