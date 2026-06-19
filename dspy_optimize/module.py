@@ -26,7 +26,9 @@ want true instruction-level optimization, use MIPROv2.
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 from typing import Any
 
 import dspy
@@ -123,6 +125,11 @@ def build_prompt(instructions: str, demos: list) -> str:
 # The DSPy module
 # ---------------------------------------------------------------------------
 
+# Module-level call counter so trace lines have a monotonically
+# increasing call number across the whole optimization run.
+_CALL_COUNTER = [0]
+
+
 class FrustrationDetector(dspy.Module):
     """Audio-in, structured-out classifier wrapping MOSS-Audio."""
 
@@ -141,6 +148,26 @@ class FrustrationDetector(dspy.Module):
         prompt = build_prompt(instructions, demos)
         raw = self.backend(audio_path, prompt)
         parsed = parse_frustration_output(raw)
+
+        # Live trace — opt-in via env var so it works during eval AND
+        # during the optimizer's internal trials, which our --verbose flag
+        # can't reach (those happen inside DSPy's own loops).
+        if os.environ.get("DSPY_TRACE_CALLS"):
+            _CALL_COUNTER[0] += 1
+            n = _CALL_COUNTER[0]
+            name = os.path.basename(audio_path)
+            reason_snip = (parsed["reason"][:80] + "…") if len(parsed["reason"]) > 80 \
+                else parsed["reason"]
+            print(
+                f"[trace #{n:04d}] {name:<48s} "
+                f"pred={parsed['frustration']:3s} "
+                f"conf={parsed['confidence']:3d} "
+                f"demos={len(demos)} "
+                f"instr_len={len(instructions)} "
+                f"reason='{reason_snip}'",
+                file=sys.stderr, flush=True,
+            )
+
         return dspy.Prediction(
             frustration=parsed["frustration"],
             confidence=parsed["confidence"],

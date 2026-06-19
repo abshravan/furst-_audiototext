@@ -100,6 +100,57 @@ python -m dspy_optimize.inspect_prompt \
 Prints the final instructions, every demo DSPy decided to keep, and
 the full prompt template as it gets sent to MOSS-Audio.
 
+## Watch the model run live during optimization
+
+Two layers of visibility, depending on how much detail you want:
+
+**1. Per-example eval prints** (covers the baseline + final-optimized
+passes, not the optimizer's internal trials):
+
+```bash
+python -m dspy_optimize.optimize --verbose ... 
+```
+Prints `[i] ✓ gold=yes pred=yes  /path/to/file.mp3` per example.
+
+**2. Every single backend call, including during optimization** (set
+the env var, no other changes):
+
+```bash
+DSPY_TRACE_CALLS=1 python -m dspy_optimize.optimize \
+    --model ./MOSS-Audio/weights/MOSS-Audio-4B-Thinking \
+    --labels dspy_optimize/labels.csv \
+    --optimizer gepa --gepa-budget light --device cuda --dtype float16
+```
+
+Each line on stderr looks like:
+```
+[trace #0042] PC0cLeFW5xLvAXVytstTT3s.mp3   pred=yes conf= 85 demos=3 instr_len=512 reason='Patient repeatedly raised...'
+```
+This covers GEPA/MIPRO's internal trials too — useful for catching
+"the model is returning gibberish" or "the optimizer is hammering one
+file over and over."
+
+## Audit the cache after the run
+
+Every `(audio_path, prompt) → output` is saved to `.dspy_cache/`. To
+review what actually happened:
+
+```bash
+# Summary table — one row per audio file, how many calls, label agreement.
+python -m dspy_optimize.inspect_cache
+
+# Full prompt + raw model output for one specific file.
+python -m dspy_optimize.inspect_cache --audio /path/to/PC0cLeFW5xLvAXVytstTT3s_patient.mp3
+
+# Only show the most-evolved prompt's predictions (filter to longest prompt).
+python -m dspy_optimize.inspect_cache --latest-prompt-only
+```
+
+Use the summary view to spot files where different prompt variants
+gave different answers (`agreement < 100%` flagged "inconsistent"). Those
+are the files the optimizer is uncertain about and probably the ones
+to label-check first.
+
 ## How it fits together
 
 ```
