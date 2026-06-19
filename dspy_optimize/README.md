@@ -112,6 +112,20 @@ python -m dspy_optimize.optimize --verbose ...
 ```
 Prints `[i] ✓ gold=yes pred=yes  /path/to/file.mp3` per example.
 
+**1b. Persist everything to a structured report file:**
+
+```bash
+python -m dspy_optimize.optimize ... --results-log run_2026-06-19.txt
+```
+
+Writes two files:
+* `run_2026-06-19.txt` — human-readable report: run settings,
+  per-example predictions for every eval pass (with reason text),
+  summary tables, and the final optimized prompt.
+* `run_2026-06-19.csv` — one row per prediction
+  (`phase, split, index, audio_path, gold, pred, correct, confidence, reason, error`)
+  for spreadsheet / pandas analysis.
+
 **2. Every single backend call, including during optimization** (set
 the env var, no other changes):
 

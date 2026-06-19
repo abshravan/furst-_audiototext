@@ -146,29 +146,84 @@ def evaluate_program(
     program: dspy.Module,
     examples: Iterable[dspy.Example],
     verbose: bool = False,
+    collect_details: bool = False,
 ) -> MetricsReport:
     """Run the program on every example and aggregate metrics.
 
     Sequential — we don't parallelize because the underlying audio model
     is already eating the GPU/CPU fully, and our backend cache means
     re-evaluations are essentially free.
+
+    If `collect_details=True`, the returned MetricsReport is wrapped in
+    an `EvalResult` carrying per-example predictions (gold, pred,
+    confidence, reason, audio_path) so the caller can dump them to a
+    log file. We keep the default return type backward compatible.
     """
     gold: list[str] = []
     pred: list[str] = []
+    details: list[dict] = []
     for i, ex in enumerate(examples, 1):
+        predicted = "no"
+        confidence = 0
+        reason = ""
+        error = ""
         try:
             out = program(audio_path=ex.audio_path)
             predicted = out.frustration
+            confidence = getattr(out, "confidence", 0) or 0
+            reason = getattr(out, "reason", "") or ""
         except Exception as exc:  # noqa: BLE001 - record errors but keep going
-            predicted = "no"
+            error = repr(exc)
             if verbose:
                 print(f"  [{i}] ERROR on {ex.audio_path}: {exc}")
         gold.append(ex.frustration)
         pred.append(predicted)
+        details.append({
+            "index": i,
+            "audio_path": ex.audio_path,
+            "gold": gold[-1],
+            "pred": pred[-1],
+            "correct": gold[-1] == pred[-1],
+            "confidence": confidence,
+            "reason": reason,
+            "error": error,
+        })
         if verbose:
             mark = "✓" if gold[-1] == pred[-1] else "✗"
             print(f"  [{i}] {mark} gold={gold[-1]:3s} pred={pred[-1]:3s}  {ex.audio_path}")
-    return compute_metrics(gold, pred)
+    report = compute_metrics(gold, pred)
+    if collect_details:
+        return EvalResult(report=report, details=details)
+    return report
+
+
+@dataclass(frozen=True)
+class EvalResult:
+    """Bundles aggregate MetricsReport with per-example prediction rows."""
+    report: MetricsReport
+    details: list
+
+    # Forward common attributes so call sites can keep using EvalResult
+    # interchangeably with MetricsReport.
+    @property
+    def n(self) -> int: return self.report.n
+    @property
+    def accuracy(self) -> float: return self.report.accuracy
+    @property
+    def precision(self) -> float: return self.report.precision
+    @property
+    def recall(self) -> float: return self.report.recall
+    @property
+    def f1(self) -> float: return self.report.f1
+    @property
+    def tp(self) -> int: return self.report.tp
+    @property
+    def fp(self) -> int: return self.report.fp
+    @property
+    def tn(self) -> int: return self.report.tn
+    @property
+    def fn(self) -> int: return self.report.fn
+    def as_dict(self) -> dict: return self.report.as_dict()
 
 
 def format_report(label: str, report: MetricsReport) -> str:

@@ -87,6 +87,11 @@ def parse_args() -> argparse.Namespace:
                         "(by default we also report metrics on all 34 examples, "
                         "not just the 10-example val split — useful for spotting "
                         "overfitting to a particular val seed).")
+    p.add_argument("--results-log", default=None,
+                   help="Write a structured text report to this path: run "
+                        "settings, per-example predictions for every eval "
+                        "pass, summary tables, and the final optimized prompt. "
+                        "Also writes a sibling .csv with one row per prediction.")
     return p.parse_args()
 
 
@@ -144,10 +149,11 @@ def main() -> int:
     print(f"\n[dspy] Evaluating BASELINE on val set ({len(val)} examples) ...",
           file=sys.stderr)
     t0 = time.time()
-    baseline_report = evaluate_program(detector, val, verbose=args.verbose)
+    baseline_val = evaluate_program(detector, val, verbose=args.verbose,
+                                    collect_details=True)
     print(f"[dspy] Baseline eval took {time.time() - t0:.1f}s", file=sys.stderr)
     print()
-    print(format_report("BASELINE", baseline_report))
+    print(format_report("BASELINE", baseline_val))
 
     # 5. Optimize.
     print(f"\n[dspy] Running {args.optimizer.upper()} optimization on "
@@ -201,10 +207,11 @@ def main() -> int:
     print(f"\n[dspy] Evaluating OPTIMIZED on val set ({len(val)} examples) ...",
           file=sys.stderr)
     t0 = time.time()
-    optimized_report = evaluate_program(optimized, val, verbose=args.verbose)
+    optimized_val = evaluate_program(optimized, val, verbose=args.verbose,
+                                     collect_details=True)
     print(f"[dspy] Optimized eval took {time.time() - t0:.1f}s", file=sys.stderr)
     print()
-    print(format_report("OPTIMIZED", optimized_report))
+    print(format_report("OPTIMIZED", optimized_val))
 
     # 7. Save the optimized program for later use.
     out_path = Path(args.output)
@@ -217,24 +224,27 @@ def main() -> int:
     print("============================================================")
     print(f" COMPARISON — VAL SPLIT ({len(val)} examples)")
     print("============================================================")
-    print(format_comparison(baseline_report, optimized_report))
+    print(format_comparison(baseline_val, optimized_val))
 
     # 9. Optional: also evaluate both programs on the FULL labels.csv.
     #    Train examples are cached after step 5, val examples after step 6,
     #    so this adds zero new GPU work for the OPTIMIZED program — and at
     #    most `len(train)` extra inference calls for the BASELINE.
+    baseline_full = optimized_full = None
     if not args.no_full_eval:
         print(f"\n[dspy] Evaluating BASELINE on FULL set ({len(examples)} examples) ...",
               file=sys.stderr)
         t0 = time.time()
-        baseline_full = evaluate_program(detector, examples, verbose=args.verbose)
+        baseline_full = evaluate_program(detector, examples, verbose=args.verbose,
+                                         collect_details=True)
         print(f"[dspy] Baseline full-set eval took {time.time() - t0:.1f}s",
               file=sys.stderr)
 
         print(f"\n[dspy] Evaluating OPTIMIZED on FULL set ({len(examples)} examples) ...",
               file=sys.stderr)
         t0 = time.time()
-        optimized_full = evaluate_program(optimized, examples, verbose=args.verbose)
+        optimized_full = evaluate_program(optimized, examples, verbose=args.verbose,
+                                          collect_details=True)
         print(f"[dspy] Optimized full-set eval took {time.time() - t0:.1f}s",
               file=sys.stderr)
 
@@ -252,11 +262,133 @@ def main() -> int:
         print("saw during compilation, so they're optimistic. The VAL-SPLIT")
         print("comparison above is the honest estimate of generalization.")
 
+    # 10. Optional: write a structured report file for analysis.
+    if args.results_log:
+        _write_results_log(
+            log_path=Path(args.results_log),
+            args=args,
+            optimized=optimized,
+            train_size=len(train),
+            baseline_val=baseline_val,
+            optimized_val=optimized_val,
+            baseline_full=baseline_full,
+            optimized_full=optimized_full,
+        )
+        print(f"\n[dspy] Wrote results log to {args.results_log}", file=sys.stderr)
+        print(f"[dspy] Wrote per-prediction CSV to "
+              f"{Path(args.results_log).with_suffix('.csv')}", file=sys.stderr)
+
     print()
     stats = backend.cache_stats()
     print(f"[dspy] Cache: {stats['disk_entries']} entries on disk at "
           f"{stats['cache_dir']}", file=sys.stderr)
     return 0
+
+
+def _write_results_log(
+    log_path: Path,
+    args,
+    optimized,
+    train_size: int,
+    baseline_val,
+    optimized_val,
+    baseline_full,
+    optimized_full,
+) -> None:
+    """Dump a human-readable report + a sibling CSV of per-example rows."""
+    import csv
+    import datetime as _dt
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---- text report ----
+    lines = []
+    lines.append("=" * 78)
+    lines.append(" DSPy optimization results")
+    lines.append("=" * 78)
+    lines.append(f"timestamp     : {_dt.datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"model         : {args.model}")
+    lines.append(f"labels        : {args.labels}")
+    lines.append(f"optimizer     : {args.optimizer}")
+    if args.optimizer == "gepa":
+        lines.append(f"gepa_budget   : {args.gepa_budget}")
+        lines.append(f"prompt_model  : {os.environ.get('DSPY_PROMPT_MODEL', '(unset)')}")
+    lines.append(f"device/dtype  : {args.device} / {args.dtype}")
+    lines.append(f"seed          : {args.seed}")
+    lines.append(f"val_ratio     : {args.val_ratio}")
+    lines.append(f"train size    : {train_size}")
+    lines.append(f"val size      : {baseline_val.n}")
+    lines.append("")
+
+    def _section(title: str, result):
+        out = [
+            "=" * 78,
+            f" {title}",
+            "=" * 78,
+            format_report(title, result),
+            "",
+            f"{'#':>3s}  {'gold':>4s}  {'pred':>4s}  {'ok':>3s}  {'conf':>4s}  {'audio'}",
+        ]
+        for d in result.details:
+            mark = "✓" if d["correct"] else "✗"
+            out.append(
+                f"{d['index']:>3d}  {d['gold']:>4s}  {d['pred']:>4s}  "
+                f"{mark:>3s}  {d['confidence']:>4d}  {d['audio_path']}"
+            )
+            if d["reason"]:
+                out.append(f"      reason: {d['reason']}")
+            if d["error"]:
+                out.append(f"      ERROR : {d['error']}")
+        out.append("")
+        return out
+
+    lines.extend(_section("BASELINE — VAL", baseline_val))
+    lines.extend(_section("OPTIMIZED — VAL", optimized_val))
+    lines.append("=" * 78)
+    lines.append(f" COMPARISON — VAL SPLIT ({baseline_val.n} examples)")
+    lines.append("=" * 78)
+    lines.append(format_comparison(baseline_val, optimized_val))
+    lines.append("")
+
+    if baseline_full and optimized_full:
+        lines.extend(_section("BASELINE — FULL", baseline_full))
+        lines.extend(_section("OPTIMIZED — FULL", optimized_full))
+        lines.append("=" * 78)
+        lines.append(f" COMPARISON — FULL DATASET ({baseline_full.n} examples)")
+        lines.append("=" * 78)
+        lines.append(format_comparison(baseline_full, optimized_full))
+        lines.append("")
+
+    lines.append("=" * 78)
+    lines.append(" OPTIMIZED PROMPT (as DSPy will reuse on subsequent runs)")
+    lines.append("=" * 78)
+    instructions = (optimized.predict.signature.instructions or "").strip()
+    demos = list(optimized.predict.demos or [])
+    lines.append("--- instructions ---")
+    lines.append(instructions if instructions else "(empty)")
+    lines.append("")
+    lines.append(f"--- demos ({len(demos)}) ---")
+    for i, d in enumerate(demos, 1):
+        lines.append(f"  {i}. audio_path={getattr(d, 'audio_path', '')}  "
+                     f"frustration={getattr(d, 'frustration', '')}")
+    log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    # ---- CSV (one row per prediction, easy to load in Excel / pandas) ----
+    csv_path = log_path.with_suffix(".csv")
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["phase", "split", "index", "audio_path",
+                         "gold", "pred", "correct", "confidence", "reason", "error"])
+        passes = [("BASELINE", "val", baseline_val),
+                  ("OPTIMIZED", "val", optimized_val)]
+        if baseline_full and optimized_full:
+            passes += [("BASELINE", "full", baseline_full),
+                       ("OPTIMIZED", "full", optimized_full)]
+        for phase, split, res in passes:
+            for d in res.details:
+                writer.writerow([phase, split, d["index"], d["audio_path"],
+                                 d["gold"], d["pred"], int(d["correct"]),
+                                 d["confidence"], d["reason"], d["error"]])
 
 
 class _NullLM(dspy.LM):
